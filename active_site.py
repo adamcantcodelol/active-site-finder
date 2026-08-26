@@ -14,6 +14,15 @@ from typing import Optional
 from foldseek_client import Hit, fetch_target_structure
 
 
+THREE_TO_ONE = {
+    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
+    "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
+    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
+    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
+    "MSE": "M", "SEP": "S", "TPO": "T", "PTR": "Y",
+}
+
+
 @dataclass
 class ActiveSiteResidue:
     query_resnum: int
@@ -38,10 +47,6 @@ def parse_site_residues(pdb_text: str, chain_id: Optional[str] = None) -> list[d
     """Parse standard PDB SITE records using the official column layout."""
     residues: list[dict] = []
     seen: set[tuple[str, int, str]] = set()
-
-    # PDB SITE columns (1-indexed): residue name 19-21, chain 23,
-    # residue sequence 24-27, insertion code 28. Python indices: 18-20,
-    # 22, 23-26, 27. There are four residue slots per SITE record.
     for line in pdb_text.splitlines():
         if not line.startswith("SITE"):
             continue
@@ -73,7 +78,6 @@ def parse_ca_residues(pdb_text: str, chain_id: Optional[str] = None) -> list[dic
     """Return ordered protein CA residues for a chain."""
     residues: list[dict] = []
     seen: set[tuple[int, str]] = set()
-
     for line in pdb_text.splitlines():
         if not line.startswith("ATOM"):
             continue
@@ -86,6 +90,7 @@ def parse_ca_residues(pdb_text: str, chain_id: Optional[str] = None) -> list[dic
         if resnum is None:
             continue
         insertion = line[26].strip()
+        resname = line[17:20].strip().upper()
         key = (resnum, insertion)
         if key in seen:
             continue
@@ -93,7 +98,10 @@ def parse_ca_residues(pdb_text: str, chain_id: Optional[str] = None) -> list[dic
         residues.append({
             "resnum": resnum,
             "insertion_code": insertion,
-            "resname": line[17:20].strip(),
+            "resname": resname,
+            # foldseek_client._alignment_start_score uses this one-letter code
+            # to anchor an alignment to the actual modeled CA residues.
+            "one": THREE_TO_ONE.get(resname, "X"),
         })
     return residues
 
@@ -132,19 +140,13 @@ def parse_ligand_contact_residues(
     chain_id: Optional[str] = None,
     cutoff_angstrom: float = 4.0,
 ) -> list[dict]:
-    """Infer binding residues from atomic contacts with non-water HETATM ligands.
-
-    This is a fallback for PDB entries without SITE annotations. Water and
-    common crystallization/solvent ions are excluded to avoid labeling them as
-    active sites. The contact threshold is intentionally conservative.
-    """
+    """Infer binding residues from atomic contacts with non-water HETATM ligands."""
     excluded = {
         "HOH", "WAT", "DOD", "SO4", "PO4", "GOL", "EDO", "PEG", "ACT",
         "CL", "NA", "K", "CA", "MG", "MN", "ZN", "FE", "CO", "NI",
     }
     ligand_atoms: list[dict] = []
     protein_atoms: list[dict] = []
-
     for line in pdb_text.splitlines():
         if line.startswith("HETATM"):
             atom = _parse_atom(line)
@@ -154,10 +156,8 @@ def parse_ligand_contact_residues(
             atom = _parse_atom(line)
             if atom and (chain_id is None or atom["chain"] == chain_id):
                 protein_atoms.append(atom)
-
     if not ligand_atoms or not protein_atoms:
         return []
-
     cutoff2 = cutoff_angstrom * cutoff_angstrom
     contacts: dict[tuple[str, int, str], dict] = {}
     for atom in protein_atoms:
@@ -195,28 +195,23 @@ def _map_binding_site_to_query(
     """Map template binding residues through a Foldseek alignment."""
     if not hit.q_aln or not hit.t_aln or hit.q_start is None or hit.t_start is None:
         return []
-
     target_residues = parse_ca_residues(target_structure, hit.chain_id)
     query_residues = parse_ca_residues(query_structure, query_chain_id)
     site_residues = _template_site_residues(target_structure, hit.chain_id)
     if not target_residues or not query_residues or not site_residues:
         return []
-
     site_keys = {(r["resnum"], r["insertion_code"]) for r in site_residues}
     q_index = hit.q_start - 1
     t_index = hit.t_start - 1
     mapped: list[tuple[int, str, str]] = []
-
     for q_char, t_char in zip(hit.q_aln, hit.t_aln):
         q_present = q_char != "-"
         t_present = t_char != "-"
-
         if q_present and t_present and 0 <= t_index < len(target_residues) and 0 <= q_index < len(query_residues):
             target_res = target_residues[t_index]
             if (target_res["resnum"], target_res["insertion_code"]) in site_keys:
                 query_res = query_residues[q_index]
                 mapped.append((query_res["resnum"], query_res["insertion_code"], query_res["resname"]))
-
         if q_present:
             q_index += 1
         if t_present:
@@ -230,11 +225,7 @@ def predict_active_site(
     query_chain_id: Optional[str] = None,
     top_n_hits: int = 15,
 ) -> list[ActiveSiteResidue]:
-    """Predict the active site using the closest experimental PDB templates.
-
-    RMSD is the primary ranking criterion. TM-score and E-value are only
-    tie-breakers. Templates without RMSD are considered after those with it.
-    """
+    """Predict the active site using the closest experimental PDB templates."""
     candidates = [
         h for h in hits
         if "pdb" in (h.database or "").lower() and h.q_aln and h.t_aln
@@ -246,10 +237,8 @@ def predict_active_site(
         h.e_value if h.e_value is not None else float("inf"),
     ))
     candidates = candidates[:max(1, top_n_hits)]
-
     votes: dict[tuple[int, str], list[str]] = {}
     names: dict[tuple[int, str], str] = {}
-
     for hit in candidates:
         target_structure = fetch_target_structure(hit)
         if not target_structure:
@@ -261,7 +250,6 @@ def predict_active_site(
             if hit.target_id not in supporters:
                 supporters.append(hit.target_id)
             names[key] = resname
-
     results = [
         ActiveSiteResidue(
             query_resnum=resnum,
