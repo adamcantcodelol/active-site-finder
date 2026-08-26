@@ -33,10 +33,10 @@ st.markdown(
 <style>
 .block-container{max-width:1400px;padding-top:1.5rem;padding-bottom:4rem}
 .mbrc-header{display:flex;align-items:center;gap:10px;margin-bottom:.25rem}
-.mbrc-logo{width:64px;height:64px;object-fit:contain;flex:0 0 64px}
-.mbrc-brand-m{font-size:2.05rem;font-weight:800;line-height:1.05;letter-spacing:-.04em}
-.mbrc-title{font-size:1.8rem;font-weight:650;line-height:1.05;letter-spacing:-.03em;margin-left:0}
-.mbrc-subtitle{color:#64748b;font-size:1rem;margin:.35rem 0 1.5rem 74px}
+.mbrc-logo{width:58px;height:58px;object-fit:contain;flex:0 0 58px}
+.mbrc-brand-m{font-size:2.05rem;font-weight:800;line-height:1;letter-spacing:-.05em;margin-right:-4px}
+.mbrc-title{font-size:1.8rem;font-weight:650;line-height:1.05;letter-spacing:-.03em;margin-left:2px}
+.mbrc-subtitle{color:#64748b;font-size:1rem;margin:.35rem 0 1.5rem 0}
 .metric-card{border:1px solid #dbe3ee;border-radius:12px;padding:16px 18px;background:#f8fafc;min-height:105px}
 .metric-label{color:#64748b;font-size:.82rem;margin-bottom:5px}.metric-value{font-size:1.55rem;font-weight:700}.metric-note{color:#64748b;font-size:.78rem;margin-top:3px}
 .site-callout{border:1px solid #cbd5e1;border-radius:12px;padding:18px;background:#f8fafc;margin:8px 0 16px}.site-title{font-size:1.15rem;font-weight:700;margin-bottom:4px}.site-residues{font-size:1.05rem;font-weight:650;word-break:break-word}.small-muted{color:#64748b;font-size:.84rem}
@@ -62,10 +62,12 @@ for logo_path, mime in logo_candidates:
 if not logo_html:
     logo_html = '<div class="mbrc-logo" aria-hidden="true"></div>'
 
+# The M is intentionally outside the shield, immediately before the BRC shield,
+# so the mark reads visually as MBRC while keeping BRC inside the shield.
 header_html = (
     '<div class="mbrc-header">'
-    + logo_html
     + '<div class="mbrc-brand-m">M</div>'
+    + logo_html
     + '<div class="mbrc-title">Active Site Finder</div>'
     + '</div>'
     + '<div class="mbrc-subtitle">Structure-first active-site prediction — ranked by the closest RMSD match.</div>'
@@ -94,8 +96,6 @@ def render_viewer(query_pdb: str, active_site_resnums: list[int], height: int = 
     resi_selector = ",".join(str(n) for n in sorted(set(active_site_resnums)))
     pdb_js = escape_js_template(query_pdb)
 
-    # Build the HTML with placeholders. This avoids Python f-string brace
-    # parsing entirely, which was the source of the Streamlit SyntaxError.
     html_doc = """
 <!doctype html>
 <html>
