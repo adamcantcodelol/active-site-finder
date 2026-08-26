@@ -38,27 +38,34 @@ class Hit:
 
     @property
     def pdb_id(self) -> str:
-        return self.target_id.split("_", 1)[0][:4].upper()
+        token = self.target_id.split()[0]
+        return token.split("-", 1)[0][:4].upper()
 
     @property
     def chain_id(self) -> Optional[str]:
-        return self.target_id.split("_", 1)[1] if "_" in self.target_id else None
+        token = self.target_id.split()[0]
+        if "_" not in token:
+            return None
+        return token.rsplit("_", 1)[1] or None
 
     def as_table_row(self) -> dict:
         return {
             "PDB / Chain": self.target_id,
             "Description": self.description or "n/a",
             "RMSD (Å)": _fmt(self.rmsd),
-            "TM-Score": _fmt(self.tm_score),
-            "Seq. Identity": _fmt(self.seq_identity * 100 if self.seq_identity is not None else None, suffix="%"),
+            "TM-Score": _fmt(self.tm_score, digits=3),
+            "Seq. Identity": _fmt(
+                self.seq_identity * 100 if self.seq_identity is not None else None,
+                suffix="%",
+            ),
             "E-value": _fmt(self.e_value, sci=True),
         }
 
 
-def _fmt(value: Optional[float], sci: bool = False, suffix: str = "") -> str:
+def _fmt(value: Optional[float], sci: bool = False, suffix: str = "", digits: int = 2) -> str:
     if value is None:
         return "n/a"
-    return f"{value:.2e}" if sci else f"{value:.2f}{suffix}"
+    return f"{value:.2e}" if sci else f"{value:.{digits}f}{suffix}"
 
 
 def _first_present(d: dict, *keys: str) -> Any:
@@ -120,7 +127,7 @@ def submit_search(structure_text: str, filename: str = "query.pdb", mode: str = 
         resp = requests.post(
             f"{FOLDSEEK_API_BASE}/ticket",
             files={"q": (filename, structure_text, "application/octet-stream")},
-            data={"mode": mode, "database[]": list(databases)},
+            data=[("mode", mode), *[("database[]", db) for db in databases]],
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -216,9 +223,18 @@ def _sort_hits(hits: list[Hit]) -> None:
     ))
 
 
-def _parse_ca_by_chain(pdb_text: str, chain_id: Optional[str]) -> list[np.ndarray]:
-    coords: list[np.ndarray] = []
-    seen: set[tuple[int, str]] = set()
+_THREE_TO_ONE = {
+    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
+    "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
+    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
+    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
+    "MSE": "M", "SEP": "S", "TPO": "T", "PTR": "Y",
+}
+
+
+def _parse_ca_by_chain(pdb_text: str, chain_id: Optional[str]) -> list[dict]:
+    residues: list[dict] = []
+    seen: set[tuple[str, int, str]] = set()
     for line in pdb_text.splitlines():
         if not line.startswith("ATOM") or line[12:16].strip() != "CA":
             continue
@@ -226,29 +242,77 @@ def _parse_ca_by_chain(pdb_text: str, chain_id: Optional[str]) -> list[np.ndarra
         if chain_id is not None and chain != chain_id:
             continue
         try:
-            key = (int(line[22:26].strip()), line[26].strip())
+            resnum = int(line[22:26].strip())
+            icode = line[26].strip()
             xyz = np.array([float(line[30:38]), float(line[38:46]), float(line[46:54])], dtype=float)
         except ValueError:
             continue
+        key = (chain, resnum, icode)
         if key in seen:
             continue
         seen.add(key)
-        coords.append(xyz)
-    return coords
+        residues.append({
+            "resnum": resnum,
+            "icode": icode,
+            "resname": line[17:20].strip().upper(),
+            "one": _THREE_TO_ONE.get(line[17:20].strip().upper(), "X"),
+            "xyz": xyz,
+        })
+    return residues
 
 
-def _aligned_ca_pairs(hit: Hit, query_pdb: str, target_pdb: str) -> tuple[np.ndarray, np.ndarray]:
-    q = _parse_ca_by_chain(query_pdb, None)
-    t = _parse_ca_by_chain(target_pdb, hit.chain_id)
-    if not q or not t or not hit.q_aln or not hit.t_aln or hit.q_start is None or hit.t_start is None:
+def _alignment_start_score(alignment: str, residues: list[dict], start_hint: Optional[int]) -> tuple[int, float]:
+    """Find the modeled-residue index that best fits a Foldseek alignment.
+
+    PDB files can omit unresolved residues, so sequence positions are not
+    always identical to the index of the modeled C-alpha list. Search near the
+    reported Foldseek start position and use sequence agreement to anchor it.
+    """
+    if not residues:
+        return 0, float("-inf")
+    ungapped = [c for c in alignment if c != "-"]
+    if not ungapped:
+        return 0, float("-inf")
+    hint = max(0, (start_hint or 1) - 1)
+    lo = max(0, hint - 25)
+    hi = min(len(residues) - 1, hint + 25)
+    best_idx, best_score = min(hint, len(residues) - 1), float("-inf")
+    for idx in range(lo, hi + 1):
+        score = 0.0
+        ri = idx
+        for char in ungapped[: min(40, len(ungapped))]:
+            if ri >= len(residues):
+                break
+            score += 2.0 if residues[ri]["one"] == char.upper() else -1.0
+            ri += 1
+        if score > best_score:
+            best_idx, best_score = idx, score
+    return best_idx, best_score
+
+
+def _aligned_ca_pairs(hit: Hit, query_pdb: str, target_pdb: str, query_chain_id: Optional[str]) -> tuple[np.ndarray, np.ndarray]:
+    if not hit.q_aln or not hit.t_aln:
         return np.empty((0, 3)), np.empty((0, 3))
-    qi, ti = hit.q_start - 1, hit.t_start - 1
-    qpts, tpts = [], []
+    qres = _parse_ca_by_chain(query_pdb, query_chain_id)
+    tres = _parse_ca_by_chain(target_pdb, hit.chain_id)
+    if not qres or not tres:
+        return np.empty((0, 3)), np.empty((0, 3))
+    qi, _ = _alignment_start_score(hit.q_aln, qres, hit.q_start)
+    ti, _ = _alignment_start_score(hit.t_aln, tres, hit.t_start)
+    qpts: list[np.ndarray] = []
+    tpts: list[np.ndarray] = []
     for qc, tc in zip(hit.q_aln, hit.t_aln):
-        if qc != "-" and tc != "-" and 0 <= qi < len(q) and 0 <= ti < len(t):
-            qpts.append(q[qi]); tpts.append(t[ti])
-        if qc != "-": qi += 1
-        if tc != "-": ti += 1
+        q_present = qc != "-"
+        t_present = tc != "-"
+        if q_present and t_present and 0 <= qi < len(qres) and 0 <= ti < len(tres):
+            qpts.append(qres[qi]["xyz"])
+            tpts.append(tres[ti]["xyz"])
+        if q_present:
+            qi += 1
+        if t_present:
+            ti += 1
+        if (qi >= len(qres) or ti >= len(tres)) and len(qpts) >= 3:
+            break
     if len(qpts) < 3:
         return np.empty((0, 3)), np.empty((0, 3))
     return np.asarray(qpts), np.asarray(tpts)
@@ -259,34 +323,38 @@ def _kabsch_rmsd(a: np.ndarray, b: np.ndarray) -> float:
     b0 = b - b.mean(axis=0)
     h = a0.T @ b0
     u, _, vt = np.linalg.svd(h)
-    d = np.sign(np.linalg.det(vt.T @ u.T))
-    if d == 0:
-        d = 1.0
+    d = 1.0 if np.linalg.det(vt.T @ u.T) >= 0 else -1.0
     rotation = vt.T @ np.diag([1.0, 1.0, d]) @ u.T
     aligned = a0 @ rotation
     return float(np.sqrt(np.mean(np.sum((aligned - b0) ** 2, axis=1))))
 
 
-def populate_missing_rmsd(hits: list[Hit], query_pdb: str, max_hits: int = 50) -> list[Hit]:
-    """Compute CA RMSD locally when the web API does not return an RMSD field.
+def populate_missing_rmsd(hits: list[Hit], query_pdb: str, query_chain_id: Optional[str] = None, max_hits: int = 50) -> list[Hit]:
+    """Calculate C-alpha RMSD for hits when the Foldseek API omits it.
 
-    Foldseek's web API can return TM-align results without an explicit RMSD in
-    some response formats. Since RMSD is the application's primary criterion,
-    calculate it from the returned residue alignment and PDB coordinates when
-    necessary rather than silently falling back to TM-score.
+    The web API commonly exposes the Foldseek alignment strings but not an
+    explicit RMSD field. We therefore calculate a rigid-body Kabsch RMSD from
+    the same alignment and the deposited PDB coordinates. The residue list is
+    anchored to the actual modeled C-alpha residues, so unresolved PDB residues
+    do not shift the alignment index.
     """
-    for hit in hits[:max_hits]:
+    attempted = 0
+    for hit in hits:
         if hit.rmsd is not None:
             continue
+        if attempted >= max_hits:
+            break
+        attempted += 1
         target = fetch_target_structure(hit)
         if not target:
             continue
-        qpts, tpts = _aligned_ca_pairs(hit, query_pdb, target)
-        if len(qpts) >= 3:
-            try:
-                hit.rmsd = _kabsch_rmsd(qpts, tpts)
-            except np.linalg.LinAlgError:
-                pass
+        qpts, tpts = _aligned_ca_pairs(hit, query_pdb, target, query_chain_id)
+        if len(qpts) < 3:
+            continue
+        try:
+            hit.rmsd = _kabsch_rmsd(qpts, tpts)
+        except np.linalg.LinAlgError:
+            continue
     _sort_hits(hits)
     return hits
 
