@@ -18,9 +18,9 @@ st.set_page_config(page_title="MBRC Active Site Finder", page_icon="🧬", layou
 
 st.markdown("""
 <style>
-.block-container{max-width:1400px;padding-top:2rem;padding-bottom:4rem}
-.mbrc-header{display:flex;align-items:center;gap:14px;margin-bottom:.3rem;min-height:72px;overflow:visible}
-.mbrc-logo{width:190px;height:72px;object-fit:contain;object-position:left center;display:block;overflow:visible;flex:0 0 190px}
+.block-container{max-width:1400px;padding-top:2.2rem;padding-bottom:4rem}
+.mbrc-header{display:flex;align-items:center;gap:16px;margin-bottom:.3rem;min-height:86px;overflow:visible}
+.mbrc-logo{width:230px;height:82px;object-fit:contain;object-position:center;display:block;flex:0 0 230px}
 .mbrc-title{font-size:1.8rem;font-weight:650;line-height:1.05;letter-spacing:-.03em}
 .mbrc-subtitle{color:#64748b;font-size:1rem;margin:.35rem 0 1.5rem}
 .metric-card{border:1px solid #dbe3ee;border-radius:12px;padding:16px 18px;background:#f8fafc;min-height:105px}
@@ -69,45 +69,30 @@ def render_viewer(pdb_id: str, height: int = 760) -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-def _alignment_rows(hit: fs.Hit, max_pairs: int = 100) -> list[dict]:
-    if not hit.q_aln or not hit.t_aln:
-        return []
-    qpos = hit.q_start or 1
-    tpos = hit.t_start or 1
-    rows = []
-    for qc, tc in zip(hit.q_aln, hit.t_aln):
-        q_here = qpos if qc != "-" else None
-        t_here = tpos if tc != "-" else None
-        if qc != "-" and tc != "-":
-            rows.append({"query_pos": q_here, "query_aa": qc.upper(), "template_pos": t_here, "template_aa": tc.upper(), "match": qc.upper() == tc.upper()})
-            if len(rows) >= max_pairs:
-                break
-        if qc != "-": qpos += 1
-        if tc != "-": tpos += 1
-    return rows
-
-
 def _best_unique_homologs(hits: list[fs.Hit], limit: int = 12) -> list[fs.Hit]:
-    """Keep one chain/hit per PDB protein: the lowest-RMSD hit wins."""
+    """Select exactly one best Foldseek chain for each unique PDB protein."""
     best_by_pdb: dict[str, fs.Hit] = {}
     for hit in hits:
         if not hit.q_aln or not hit.t_aln:
             continue
-        key = hit.pdb_id
-        old = best_by_pdb.get(key)
+        old = best_by_pdb.get(hit.pdb_id)
         if old is None or (
             hit.rmsd is not None and (old.rmsd is None or hit.rmsd < old.rmsd)
         ):
-            best_by_pdb[key] = hit
+            best_by_pdb[hit.pdb_id] = hit
     result = list(best_by_pdb.values())
-    result.sort(key=lambda h: (h.rmsd is None, h.rmsd if h.rmsd is not None else float("inf")))
+    result.sort(key=lambda h: (
+        h.rmsd is None,
+        h.rmsd if h.rmsd is not None else float("inf"),
+        -(h.tm_score if h.tm_score is not None else -1.0),
+    ))
     return result[:limit]
 
 
 def _site_correspondences(hit: fs.Hit, query_pdb: str, query_chain: str | None) -> list[dict]:
-    """Return only experimentally supported template-site residues and their query matches."""
+    """Map only the homolog's experimentally observed active-site residues."""
     target_pdb = asite.fetch_target_structure(hit)
-    if not target_pdb or not hit.q_aln or not hit.t_aln or hit.q_start is None or hit.t_start is None:
+    if not target_pdb or not hit.q_aln or not hit.t_aln:
         return []
 
     target_residues = asite.parse_ca_residues(target_pdb, hit.chain_id)
@@ -116,12 +101,10 @@ def _site_correspondences(hit: fs.Hit, query_pdb: str, query_chain: str | None) 
     if not target_residues or not query_residues or not site_residues:
         return []
 
-    site_keys = {(r["resnum"], r["insertion_code"]): r for r in site_residues}
-    # Foldseek positions are sequence positions; anchor against the modeled CA list
-    # because deposited structures can contain missing/unresolved residues.
+    site_keys = {(r["resnum"], r["insertion_code"]) for r in site_residues}
     ti, _ = fs._alignment_start_score(hit.t_aln, target_residues, hit.t_start)
     qi, _ = fs._alignment_start_score(hit.q_aln, query_residues, hit.q_start)
-    out = []
+    out: list[dict] = []
 
     for qc, tc in zip(hit.q_aln, hit.t_aln):
         if qc != "-" and tc != "-" and 0 <= qi < len(query_residues) and 0 <= ti < len(target_residues):
@@ -150,10 +133,10 @@ def render_match_results(hits: list[fs.Hit], query_pdb: str, query_chain: str | 
         return
 
     st.markdown(
-        "**One best homolog per protein.** For each PDB protein, the chain with the "
-        "lowest RMSD is selected. Only experimentally annotated or ligand-contact "
-        "residues from that homolog are shown below, in the same template → query "
-        "style as the reference tool."
+        "**One best homolog per protein.** Each PDB protein is represented once, "
+        "using its lowest-RMSD chain. The pattern below shows the experimentally "
+        "defined binding-site residue in the homolog and the residue it corresponds "
+        "to in your query, like SPRITE."
     )
 
     displayed = 0
@@ -163,35 +146,60 @@ def render_match_results(hits: list[fs.Hit], query_pdb: str, query_chain: str | 
             continue
         displayed += 1
         rmsd = f"{hit.rmsd:.2f} Å" if hit.rmsd is not None else "n/a"
+        lines = []
+        for p in pairs:
+            lines.append(
+                f'<div class="match-pattern">'
+                f'<span class="match-template">{p["template_chain"]}{p["template_resnum"]} '
+                f'{html.escape(p["template_resname"])}</span>'
+                f' matches '
+                f'<span class="match-query">{p["query_chain"]}{p["query_resnum"]} '
+                f'{html.escape(p["query_resname"])}</span>'
+                f'{" ✓" if p["exact"] else ""}'
+                f'</div>'
+            )
         st.markdown(
-            f'<div class="match-card"><div class="match-header">{html.escape(hit.pdb_id)} — {html.escape(hit.description or "structural homolog")}</div>'
-            f'<div class="match-meta">Chain {html.escape(hit.chain_id or "?")} · RMSD {rmsd} · {len(pairs)} active-site residue match(es)</div>'
-            + "".join(
-                f'<div class="match-pattern"><span class="match-template">{p["template_chain"]}{p["template_resnum"]} {html.escape(p["template_resname"])}'</n                f' matches </span><span class="match-query">{p["query_chain"]}{p["query_resnum"]} {html.escape(p["query_resname"])}'</span></div>'
-                for p in pairs
-            ) + '</div>',
+            f'<div class="match-card">'
+            f'<div class="match-header">{html.escape(hit.pdb_id)} — '
+            f'{html.escape(hit.description or "structural homolog")}</div>'
+            f'<div class="match-meta">Chain {html.escape(hit.chain_id or "?")} · '
+            f'RMSD {rmsd} · {len(pairs)} active-site residue match(es)</div>'
+            + "".join(lines)
+            + '</div>',
             unsafe_allow_html=True,
         )
+
     if displayed == 0:
-        st.info("The homologs were found, but none contained parseable experimental SITE/ligand-contact residues to display as an active-site pattern.")
+        st.info("Homologs were found, but their deposited structures did not contain parseable SITE records or ligand-contact residues to display.")
 
 
 if run_clicked:
     if len(pdb_id) != 4 or not pdb_id.isalnum():
         st.error("Enter a valid 4-character PDB ID, such as 4HHB.")
         st.stop()
+
     try:
         with st.spinner(f"Fetching {pdb_id} and finding structural matches..."):
-            ticket, query_pdb = fs.submit_search_by_pdb_id(pdb_id, mode="tmalign", databases=["pdb100"])
+            ticket, query_pdb = fs.submit_search_by_pdb_id(
+                pdb_id, mode="tmalign", databases=["pdb100"]
+            )
         query_chain = asite.guess_first_chain_id(query_pdb)
 
         status = st.empty()
-        fs.poll_until_complete(ticket, max_wait_seconds=300, on_status=lambda s, e: status.info(f"Foldseek search: {s.lower()} — {e}s elapsed"))
+        fs.poll_until_complete(
+            ticket,
+            max_wait_seconds=300,
+            on_status=lambda s, e: status.info(
+                f"Foldseek search: {s.lower()} — {e}s elapsed"
+            ),
+        )
         status.empty()
 
         with st.spinner("Calculating RMSD for the structural matches..."):
             hits = fs.fetch_results(ticket, databases=["pdb100"])
-            fs.populate_missing_rmsd(hits, query_pdb, query_chain_id=query_chain, max_hits=50)
+            fs.populate_missing_rmsd(
+                hits, query_pdb, query_chain_id=query_chain, max_hits=50
+            )
 
         if not hits:
             st.warning("Foldseek returned no structural matches. Try another PDB entry.")
@@ -203,44 +211,102 @@ if run_clicked:
             st.subheader("Closest structural match")
             c1, c2, c3, c4 = st.columns(4)
             with c1:
-                st.markdown(f'<div class="metric-card"><div class="metric-label">PDB / chain</div><div class="metric-value">{html.escape(best.target_id)}</div><div class="metric-note">lowest RMSD match</div></div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="metric-card"><div class="metric-label">PDB / chain</div>'
+                    f'<div class="metric-value">{html.escape(best.target_id)}</div>'
+                    f'<div class="metric-note">lowest RMSD match</div></div>',
+                    unsafe_allow_html=True,
+                )
             with c2:
-                st.markdown(f'<div class="metric-card"><div class="metric-label">RMSD</div><div class="metric-value">{best.rmsd:.2f} Å</div><div class="metric-note">lower is closer</div></div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="metric-card"><div class="metric-label">RMSD</div>'
+                    f'<div class="metric-value">{best.rmsd:.2f} Å</div>'
+                    f'<div class="metric-note">lower is closer</div></div>',
+                    unsafe_allow_html=True,
+                )
             with c3:
                 tm = f"{best.tm_score:.3f}" if best.tm_score is not None else "n/a"
-                st.markdown(f'<div class="metric-card"><div class="metric-label">TM-score</div><div class="metric-value">{tm}</div><div class="metric-note">structural similarity</div></div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="metric-card"><div class="metric-label">TM-score</div>'
+                    f'<div class="metric-value">{tm}</div>'
+                    f'<div class="metric-note">structural similarity</div></div>',
+                    unsafe_allow_html=True,
+                )
             with c4:
-                ident = f"{best.seq_identity*100:.1f}%" if best.seq_identity is not None else "n/a"
-                st.markdown(f'<div class="metric-card"><div class="metric-label">Sequence identity</div><div class="metric-value">{ident}</div><div class="metric-note">aligned residues</div></div>', unsafe_allow_html=True)
-            if best.description: st.caption(best.description)
+                ident = f"{best.seq_identity * 100:.1f}%" if best.seq_identity is not None else "n/a"
+                st.markdown(
+                    f'<div class="metric-card"><div class="metric-label">Sequence identity</div>'
+                    f'<div class="metric-value">{ident}</div>'
+                    f'<div class="metric-note">aligned residues</div></div>',
+                    unsafe_allow_html=True,
+                )
+            if best.description:
+                st.caption(best.description)
         else:
-            st.error("The search returned matches, but no valid RMSD could be calculated. The app will not pretend that a TM-score-ranked hit is an RMSD winner.")
+            st.error(
+                "The search returned matches, but no valid RMSD could be calculated. "
+                "The app will not pretend that a TM-score-ranked hit is an RMSD winner."
+            )
             best = None
 
         st.subheader("Structural matches — ranked by RMSD")
         shown_hits = rmsd_hits[:25] if rmsd_hits else hits[:25]
-        st.dataframe(pd.DataFrame([
-            {"Rank": i + 1, "PDB / Chain": h.target_id, "Description": h.description or "n/a", "RMSD (Å)": f"{h.rmsd:.2f}" if h.rmsd is not None else "n/a", "TM-Score": f"{h.tm_score:.3f}" if h.tm_score is not None else "n/a", "Seq. Identity": f"{h.seq_identity*100:.1f}%" if h.seq_identity is not None else "n/a"}
-            for i, h in enumerate(shown_hits)
-        ]), use_container_width=True, hide_index=True)
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "Rank": i + 1,
+                    "PDB / Chain": h.target_id,
+                    "Description": h.description or "n/a",
+                    "RMSD (Å)": f"{h.rmsd:.2f}" if h.rmsd is not None else "n/a",
+                    "TM-Score": f"{h.tm_score:.3f}" if h.tm_score is not None else "n/a",
+                    "Seq. Identity": f"{h.seq_identity * 100:.1f}%" if h.seq_identity is not None else "n/a",
+                }
+                for i, h in enumerate(shown_hits)
+            ]),
+            use_container_width=True,
+            hide_index=True,
+        )
 
         st.subheader("Active-site match results")
         render_match_results(hits, query_pdb, query_chain)
 
         st.subheader("Predicted active site")
         with st.spinner("Mapping experimentally observed ligand-binding residues..."):
-            predicted = asite.predict_active_site(hits, query_pdb_text=query_pdb, query_chain_id=query_chain, top_n_hits=15)
+            predicted = asite.predict_active_site(
+                hits,
+                query_pdb_text=query_pdb,
+                query_chain_id=query_chain,
+                top_n_hits=15,
+            )
         if not predicted:
-            st.info("No active-site residues could be transferred from the experimental structural matches. The structural search itself completed successfully.")
+            st.info(
+                "No active-site residues could be transferred from the experimental "
+                "structural matches. The structural search itself completed successfully."
+            )
         else:
             confident = [r for r in predicted if r.support_count >= 2]
             site = confident if confident else predicted[:15]
             text = ", ".join(f"{r.query_resname or '?'}{r.display_resnum}" for r in site)
-            st.markdown(f'<div class="site-callout"><div class="site-title">Most strongly supported residues</div><div class="site-residues">{html.escape(text)}</div><div class="small-muted">Highest-supported residue has evidence from {site[0].support_count} structural template(s).</div></div>', unsafe_allow_html=True)
-            st.dataframe(pd.DataFrame([
-                {"Residue": f"{r.query_resname or '?'}{r.display_resnum}", "Query position": r.display_resnum, "Homologs agreeing": r.support_count, "Supporting structures": ", ".join(r.supporting_hits[:6])}
-                for r in site
-            ]), use_container_width=True, hide_index=True)
+            st.markdown(
+                f'<div class="site-callout"><div class="site-title">Most strongly supported residues</div>'
+                f'<div class="site-residues">{html.escape(text)}</div>'
+                f'<div class="small-muted">Highest-supported residue has evidence from '
+                f'{site[0].support_count} structural template(s).</div></div>',
+                unsafe_allow_html=True,
+            )
+            st.dataframe(
+                pd.DataFrame([
+                    {
+                        "Residue": f"{r.query_resname or '?'}{r.display_resnum}",
+                        "Query position": r.display_resnum,
+                        "Homologs agreeing": r.support_count,
+                        "Supporting structures": ", ".join(r.supporting_hits[:6]),
+                    }
+                    for r in site
+                ]),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         st.subheader("3D structure")
         render_viewer(pdb_id)
