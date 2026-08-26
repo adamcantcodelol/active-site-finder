@@ -26,19 +26,17 @@ st.set_page_config(page_title="MBRC Active Site Finder", page_icon="🧬", layou
 st.markdown("""
 <style>
 .block-container{max-width:1400px;padding-top:1.5rem;padding-bottom:4rem}
-.mbrc-header{display:flex;align-items:center;gap:14px;margin-bottom:.25rem}
-.mbrc-logo{width:62px;height:62px;object-fit:contain;flex:0 0 62px}
-.mbrc-brand-m{font-size:2rem;font-weight:750;line-height:1.05;letter-spacing:-.03em}
-.mbrc-title{font-size:1.8rem;font-weight:650;line-height:1.05;letter-spacing:-.03em;margin-left:2px}
-.mbrc-subtitle{color:#64748b;font-size:1rem;margin:.35rem 0 1.5rem 76px}
+.mbrc-header{display:flex;align-items:center;gap:10px;margin-bottom:.25rem}
+.mbrc-logo{width:64px;height:64px;object-fit:contain;flex:0 0 64px}
+.mbrc-brand-m{font-size:2.05rem;font-weight:800;line-height:1.05;letter-spacing:-.04em}
+.mbrc-title{font-size:1.8rem;font-weight:650;line-height:1.05;letter-spacing:-.03em;margin-left:0}
+.mbrc-subtitle{color:#64748b;font-size:1rem;margin:.35rem 0 1.5rem 74px}
 .metric-card{border:1px solid #dbe3ee;border-radius:12px;padding:16px 18px;background:#f8fafc;min-height:105px}
 .metric-label{color:#64748b;font-size:.82rem;margin-bottom:5px}.metric-value{font-size:1.55rem;font-weight:700}.metric-note{color:#64748b;font-size:.78rem;margin-top:3px}
 .site-callout{border:1px solid #cbd5e1;border-radius:12px;padding:18px;background:#f8fafc;margin:8px 0 16px}.site-title{font-size:1.15rem;font-weight:700;margin-bottom:4px}.site-residues{font-size:1.05rem;font-weight:650;word-break:break-word}.small-muted{color:#64748b;font-size:.84rem}
 </style>
 """, unsafe_allow_html=True)
 
-
-# Header: the shield contains BRC, with the M immediately beside it.
 base_dir = os.path.dirname(__file__)
 logo_candidates = [
     (os.path.join(base_dir, "assets", "mbrc_logo.svg"), "image/svg+xml"),
@@ -70,8 +68,7 @@ pdb_id = st.text_input("PDB ID", placeholder="e.g. 4HHB", max_chars=4).strip().u
 run_clicked = st.button("Find active site", type="primary")
 
 
-def render_viewer(query_pdb: str, active_site_resnums: list[int], height: int = 650) -> None:
-    """Render a 3Dmol viewer with the legend inside the iframe."""
+def render_viewer(query_pdb: str, active_site_resnums: list[int], height: int = 700) -> None:
     def _escape_js_template(text: str) -> str:
         return text.replace("\\", "\\\\").replace("`", "\\`").replace("</script>", "<\\/script>")
 
@@ -81,8 +78,8 @@ def render_viewer(query_pdb: str, active_site_resnums: list[int], height: int = 
     <!doctype html><html><head><meta charset="utf-8">
     <style>
       html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#fff;font-family:Arial,sans-serif}}
-      #viewer3d{{width:100%;height:calc(100% - 44px);min-height:560px;position:relative}}
-      #legend{{height:44px;display:flex;align-items:center;padding:0 12px;color:#475569;font-size:13px;box-sizing:border-box;border-top:1px solid #e2e8f0}}
+      #viewer3d{{width:100%;height:calc(100% - 46px);position:relative}}
+      #legend{{height:46px;display:flex;align-items:center;padding:0 12px;color:#475569;font-size:13px;box-sizing:border-box;border-top:1px solid #e2e8f0;background:#fff}}
     </style>
     <script src="https://3Dmol.org/build/3Dmol-min.js"></script></head>
     <body><div id="viewer3d"></div><div id="legend">Gray = protein &nbsp;&nbsp;|&nbsp;&nbsp; Orange = predicted active-site residues</div>
@@ -90,7 +87,7 @@ def render_viewer(query_pdb: str, active_site_resnums: list[int], height: int = 
       const el=document.getElementById("viewer3d");const viewer=$3Dmol.createViewer(el,{{backgroundColor:"white"}});const model=viewer.addModel(`{pdb_js}`,"pdb");
       model.setStyle({{}},{{cartoon:{{color:"lightgray"}}}});const active="{resi_selector}";
       if(active){{model.setStyle({{resi:active}},{{cartoon:{{color:"orange"}},stick:{{radius:0.18,colorscheme:"orangeCarbon"}}}}});model.addStyle({{resi:active}},{{sphere:{{radius:0.35,colorscheme:"orangeCarbon"}}}});}}
-      viewer.zoomTo();viewer.render();window.addEventListener("resize",()=>viewer.resize());
+      viewer.zoomTo();viewer.render();setTimeout(()=>viewer.resize(),50);window.addEventListener("resize",()=>viewer.resize());
     </script></body></html>
     """
     components.html(html_doc, height=height, scrolling=False)
@@ -110,6 +107,9 @@ if run_clicked:
 
         with st.spinner("Reading structural matches and calculating the RMSD ranking..."):
             hits = fs.fetch_results(ticket_id, databases=["pdb100"])
+            # The API does not always include RMSD. Compute it from the aligned
+            # C-alpha coordinates so RMSD really is the primary metric.
+            fs.populate_missing_rmsd(hits, query_pdb_text, max_hits=50)
         if not hits:
             st.warning("Foldseek returned no structural matches. Try another PDB entry.")
             st.stop()
@@ -129,7 +129,7 @@ if run_clicked:
                 st.markdown(f'<div class="metric-card"><div class="metric-label">Sequence identity</div><div class="metric-value">{ident}</div><div class="metric-note">aligned residues</div></div>',unsafe_allow_html=True)
             if best.description: st.caption(best.description)
         else:
-            st.warning("Foldseek returned matches, but no RMSD values were present in its response, so an RMSD-based winner cannot be selected.")
+            st.warning("Foldseek returned matches, but RMSD could not be calculated from the available alignments. No RMSD-based winner is shown.")
 
         st.subheader("Structural matches — ranked by RMSD")
         table_hits=rmsd_hits[:25] if rmsd_hits else hits[:25]
@@ -141,7 +141,7 @@ if run_clicked:
         with st.spinner("Transferring known ligand-binding sites from the closest-RMSD experimental structures..."):
             predicted=asite.predict_active_site(hits,query_pdb_text=query_pdb_text,query_chain_id=query_chain,top_n_hits=15)
         if not predicted:
-            st.info("No active-site residues could be transferred. This can happen when the closest PDB structures have no usable ligand annotation or the Foldseek alignment does not contain residue-level alignment strings.")
+            st.info("No active-site residues could be transferred from the structural templates. The search still completed successfully; the closest-RMSD structures may lack deposited ligand annotations or usable residue alignments.")
         else:
             confident=[r for r in predicted if r.support_count>=2];shown=confident if confident else predicted[:15]
             residue_text=", ".join(f"{r.query_resname or '?'}{r.display_resnum}" for r in shown);strongest=shown[0]
@@ -151,7 +151,7 @@ if run_clicked:
             st.caption("Multiple independent experimental structures agreeing on the same query residue provide stronger support.")
 
         st.subheader("3D structure")
-        render_viewer(query_pdb_text,[r.query_resnum for r in predicted],height=650)
+        render_viewer(query_pdb_text,[r.query_resnum for r in predicted],height=700)
 
     except fs.FoldseekError as exc:
         st.error(f"Structural search failed: {exc}")
