@@ -29,10 +29,11 @@ st.markdown("""
 .sprite-table td{padding:9px;border-bottom:1px solid #eef2f7;font-size:.93rem}.sprite-table tr:last-child td{border-bottom:0}
 .sprite-exact{font-weight:700}.sprite-arrow{color:#64748b;padding:0 10px}.sprite-note{color:#64748b;font-family:Arial,Helvetica,sans-serif;font-size:.8rem;margin-top:10px}
 .site-callout{border:1px solid #cbd5e1;border-radius:12px;padding:18px;background:#f8fafc;margin:8px 0 12px}.site-title{font-size:1.15rem;font-weight:700}.site-residues{font-size:1.05rem;font-weight:650;word-break:break-word}.small-muted{color:#64748b;font-size:.84rem}
+.chimera-box{border:1px solid #dbe3ee;border-radius:10px;padding:12px 14px;background:#fafcff;margin:8px 0 14px}
 </style>
 """, unsafe_allow_html=True)
 
-# M is inside the shield. BRC is outside. The viewBox includes extra top room.
+# M is inside the shield; BRC is outside. Extra viewBox height prevents clipping.
 logo="""<svg class='mbrc-logo' viewBox='0 0 470 130' xmlns='http://www.w3.org/2000/svg' role='img' aria-label='MBRC logo'>
 <path d='M92 10 L162 28 L162 60 C162 91 140 112 92 124 C44 112 22 91 22 60 L22 28 Z' fill='none' stroke='#111827' stroke-width='5' stroke-linejoin='round'/>
 <text x='92' y='82' text-anchor='middle' font-family='Arial,Helvetica,sans-serif' font-size='58' font-weight='800' fill='#111827'>M</text>
@@ -45,13 +46,17 @@ pdb_id=st.text_input("PDB ID",placeholder="e.g. 4HHB",max_chars=4).strip().upper
 run=st.button("Find active site",type="primary")
 
 
+def valid_hits(hits):
+    return [h for h in hits if h.rmsd is not None and h.q_aln and h.t_aln]
+
+
 def best_hit(hits):
-    valid=[h for h in hits if h.rmsd is not None and h.q_aln and h.t_aln]
-    return min(valid,key=lambda h:h.rmsd) if valid else None
+    candidates=valid_hits(hits)
+    return min(candidates,key=lambda h:(h.rmsd,-(h.tm_score if h.tm_score is not None else -1.0))) if candidates else None
 
 
 def map_site(hit,query_pdb,query_chain):
-    """Map this ONE homolog's experimental site through its Foldseek alignment."""
+    """Map exactly one homolog's experimental site through its alignment."""
     try:
         target_pdb=asite.fetch_target_structure(hit)
         if not target_pdb or not hit.q_aln or not hit.t_aln:return []
@@ -68,7 +73,7 @@ def map_site(hit,query_pdb,query_chain):
                 tr=target[ti]
                 if (tr["resnum"],tr["insertion_code"]) in keys:
                     qr=query[qi]
-                    out.append({"tchain":hit.chain_id or "?","tn":tr["resnum"],"tname":tr["resname"],"qchain":query_chain or "?","qn":qr["resnum"],"qname":qr["resname"],"exact":tr["resname"]==qr["resname"]})
+                    out.append({"tchain":hit.chain_id or "?","tn":tr["resnum"],"ticode":tr["insertion_code"],"tname":tr["resname"],"qchain":query_chain or "?","qn":qr["resnum"],"qicode":qr["insertion_code"],"qname":qr["resname"],"exact":tr["resname"].upper()==qr["resname"].upper()})
             if qc!="-":qi+=1
             if tc!="-":ti+=1
         return out
@@ -77,50 +82,64 @@ def map_site(hit,query_pdb,query_chain):
 
 
 def local_triplet(pairs):
-    """Choose one tight 3-residue site segment, not the whole active site."""
-    pairs=sorted(pairs,key=lambda p:(p["qn"],p["tn"]))
+    """Choose one tight three-residue local cluster from one site's mapped residues."""
+    pairs=sorted(pairs,key=lambda p:(p["qn"],p["qicode"],p["tn"],p["ticode"]))
     if len(pairs)<=3:return pairs
     best=None
     for i in range(len(pairs)-2):
         g=pairs[i:i+3]
         gaps=sum(max(0,g[j+1]["qn"]-g[j]["qn"]-1) for j in range(2))
         span=g[-1]["qn"]-g[0]["qn"]
-        exact=sum(p["exact"] for p in g)
+        exact=sum(1 for p in g if p["exact"])
         score=(gaps,span,-exact,g[0]["qn"])
         if best is None or score<best[0]:best=(score,g)
     return best[1]
 
 
+def res_spec(num,icode=""):
+    return f"{num}{icode}" if icode else str(num)
+
+
 def chimera_command(model,chain,numbers):
-    nums=sorted(set(int(n) for n in numbers))
+    """Create a ChimeraX atom-spec selection command with no shell-sensitive input."""
+    nums=[]
+    for n in numbers:
+        try:nums.append(int(n))
+        except (TypeError,ValueError):continue
+    nums=sorted(set(nums))
     if not nums:return "select clear"
-    c=f"/{chain}" if chain and chain!="?" else ""
-    return f"select {model}{c}:{','.join(map(str,nums))}"
+    chain_part=f"/{chain}" if chain and chain!="?" else ""
+    return f"select {model}{chain_part}:{','.join(str(n) for n in nums)}"
 
 
-def reveal_button(label,command,key):
-    if st.button(label,key=key,use_container_width=True):st.session_state[f"show_{key}"]=True
+def reveal_button(label,command,key,help_text):
+    if st.button(label,key=key,use_container_width=True):
+        st.session_state[f"show_{key}"]=True
     if st.session_state.get(f"show_{key}"):
+        st.markdown('<div class="chimera-box">',unsafe_allow_html=True)
         st.code(command,language="text")
-        st.caption("Paste into ChimeraX after opening the original as #1 and the homolog as #2. If your model numbers differ, replace #1/#2.")
+        st.caption(help_text)
+        st.markdown('</div>',unsafe_allow_html=True)
 
 
 def render_sprite(hit,pairs,query_id):
     chosen=local_triplet(pairs)
     if not chosen:
-        st.info("This selected homolog has no experimentally annotated active-site residues that can be mapped to the original protein.")
+        st.info("This homolog has no experimentally annotated active-site residues that can be mapped to the original protein. Try another homolog in the selector.")
         return
     rows=[]
     for p in chosen:
         mark=" ✓" if p["exact"] else ""
-        rows.append(f'<tr><td>{html.escape(p["tchain"])}{p["tn"]} {html.escape(p["tname"])}</td><td class="sprite-arrow">matches</td><td class="sprite-exact">{html.escape(p["qchain"])}{p["qn"]} {html.escape(p["qname"])}{mark}</td></tr>')
+        rows.append(f'<tr><td>{html.escape(p["tchain"])}{html.escape(res_spec(p["tn"],p["ticode"]))} {html.escape(p["tname"])}</td><td class="sprite-arrow">matches</td><td class="sprite-exact">{html.escape(p["qchain"])}{html.escape(res_spec(p["qn"],p["qicode"]))} {html.escape(p["qname"])}{mark}</td></tr>')
     rmsd=f"{hit.rmsd:.2f} Å"
-    st.markdown(f'<div class="sprite-card"><div class="sprite-head">SPRITE-style local match</div><div class="sprite-meta"><b>{html.escape(hit.pdb_id)}</b> — {html.escape(hit.description or "structural homolog")} · Chain {html.escape(hit.chain_id or "?")} · RMSD {rmsd}</div><table class="sprite-table"><thead><tr><th>Homolog</th><th></th><th>{html.escape(query_id)} (original)</th></tr></thead><tbody>{"".join(rows)}</tbody></table><div class="sprite-note">One selected homolog and one compact three-residue local match.</div></div>',unsafe_allow_html=True)
+    st.markdown(f'<div class="sprite-card"><div class="sprite-head">SPRITE-style local match</div><div class="sprite-meta"><b>{html.escape(hit.pdb_id)}</b> — {html.escape(hit.description or "structural homolog")} · Chain {html.escape(hit.chain_id or "?")} · RMSD {rmsd}</div><table class="sprite-table"><thead><tr><th>Homolog</th><th></th><th>{html.escape(query_id)} (original)</th></tr></thead><tbody>{"".join(rows)}</tbody></table><div class="sprite-note">Three residues from one local experimental site are shown. ✓ means the amino-acid identity is conserved.</div></div>',unsafe_allow_html=True)
     a,b=st.columns(2)
+    selected_tnums=[p["tn"] for p in chosen]
+    selected_qnums=[p["qn"] for p in chosen]
     with a:
-        reveal_button("ChimeraX: select homolog match",chimera_command("#2",chosen[0]["tchain"],[p["tn"] for p in chosen]),"sprite_homolog")
+        reveal_button("ChimeraX: select homolog match",chimera_command("#2",chosen[0]["tchain"],selected_tnums),"sprite_homolog",f"Open the selected homolog as model #2, then paste this command. Chain {chosen[0]['tchain']} is selected.")
     with b:
-        reveal_button("ChimeraX: select original match",chimera_command("#1",chosen[0]["qchain"],[p["qn"] for p in chosen]),"sprite_original")
+        reveal_button("ChimeraX: select original match",chimera_command("#1",chosen[0]["qchain"],selected_qnums),"sprite_original",f"Open the original protein as model #1, then paste this command. Chain {chosen[0]['qchain']} is selected.")
 
 
 def render_viewer(pid):
@@ -135,16 +154,20 @@ if run:
         with st.spinner(f"Fetching {pdb_id} and finding structural matches..."):
             ticket,query_pdb=fs.submit_search_by_pdb_id(pdb_id,mode="tmalign",databases=["pdb100"])
         query_chain=asite.guess_first_chain_id(query_pdb)
+        if not query_chain:
+            st.error("The PDB entry was downloaded, but no protein C-alpha chain could be parsed.");st.stop()
         fs.poll_until_complete(ticket,max_wait_seconds=300)
         with st.spinner("Calculating RMSD for the structural matches..."):
             hits=fs.fetch_results(ticket,databases=["pdb100"])
             fs.populate_missing_rmsd(hits,query_pdb,query_chain_id=query_chain,max_hits=50)
-        rmsd_hits=sorted([h for h in hits if h.rmsd is not None and h.q_aln and h.t_aln],key=lambda h:h.rmsd)
-        if not rmsd_hits:st.error("No valid RMSD structural matches were returned.");st.stop()
+        rmsd_hits=sorted(valid_hits(hits),key=lambda h:(h.rmsd,-(h.tm_score if h.tm_score is not None else -1.0)))
+        if not rmsd_hits:
+            st.error("Foldseek returned matches, but none had a valid RMSD and alignment. No scientifically meaningful ranking can be shown.");st.stop()
         st.session_state.update(query_id=pdb_id,query_pdb=query_pdb,query_chain=query_chain,hits=hits,rmsd_hits=rmsd_hits)
-        # Reset the selector whenever a new PDB search is run.
         st.session_state["selected_hit_index"]=0
         st.session_state.pop("homolog_selector",None)
+        for key in ("sprite_homolog","sprite_original","predicted_site"):
+            st.session_state.pop(f"show_{key}",None)
     except fs.FoldseekError as exc:st.error(f"Structural search failed: {exc}")
     except Exception as exc:st.error(f"Unexpected error: {type(exc).__name__}: {exc}")
 
@@ -156,7 +179,7 @@ if "rmsd_hits" in st.session_state:
 
     st.subheader("Closest structural match")
     c1,c2,c3,c4=st.columns(4)
-    with c1:st.markdown(f'<div class="metric-card"><div class="metric-label">PDB / chain</div><div class="metric-value">{html.escape(best.target_id)}</div><div class="metric-note">lowest RMSD match</div></div>',unsafe_allow_html=True)
+    with c1:st.markdown(f'<div class="metric-card"><div class="metric-label">PDB / chain</div><div class="metric-value">{html.escape(best.target_id)}</div><div class="metric-note">lowest valid RMSD</div></div>',unsafe_allow_html=True)
     with c2:st.markdown(f'<div class="metric-card"><div class="metric-label">RMSD</div><div class="metric-value">{best.rmsd:.2f} Å</div><div class="metric-note">lower is closer</div></div>',unsafe_allow_html=True)
     with c3:
         tm=f"{best.tm_score:.3f}" if best.tm_score is not None else "n/a"
@@ -166,6 +189,7 @@ if "rmsd_hits" in st.session_state:
         st.markdown(f'<div class="metric-card"><div class="metric-label">Sequence identity</div><div class="metric-value">{ident}</div><div class="metric-note">aligned residues</div></div>',unsafe_allow_html=True)
 
     st.subheader("Structural matches — ranked by RMSD")
+    st.caption("Ranking is based only on valid structural RMSD. A structure can rank highly even if it has no experimentally mappable active-site annotation.")
     st.dataframe(pd.DataFrame([{"Rank":i+1,"PDB / Chain":h.target_id,"Description":h.description or "n/a","RMSD (Å)":f"{h.rmsd:.2f}","TM-Score":f"{h.tm_score:.3f}" if h.tm_score is not None else "n/a","Seq. Identity":f"{h.seq_identity*100:.1f}%" if h.seq_identity is not None else "n/a"} for i,h in enumerate(rmsd_hits[:50])]),use_container_width=True,hide_index=True)
 
     st.subheader("SPRITE-style active-site match")
@@ -182,11 +206,13 @@ if "rmsd_hits" in st.session_state:
     with st.spinner("Mapping experimentally observed ligand-binding residues..."):
         predicted=asite.predict_active_site(hits,query_pdb_text=query_pdb,query_chain_id=query_chain,top_n_hits=15)
     if predicted:
-        confident=[r for r in predicted if r.support_count>=2];site=confident if confident else predicted[:15]
+        confident=[r for r in predicted if r.support_count>=2]
+        site=confident if confident else predicted[:15]
         text=", ".join(f"{r.query_resname or '?'}{r.display_resnum}" for r in site)
-        st.markdown(f'<div class="site-callout"><div class="site-title">Most strongly supported residues</div><div class="site-residues">{html.escape(text)}</div><div class="small-muted">Highest-supported residue has evidence from {site[0].support_count} structural template(s).</div></div>',unsafe_allow_html=True)
-        reveal_button("ChimeraX: select predicted active site",chimera_command("#1",query_chain,[r.query_resnum for r in site]),"predicted_site")
-    else:st.info("No active-site residues could be transferred from the experimental structural matches.")
+        st.markdown(f'<div class="site-callout"><div class="site-title">Most strongly supported residues</div><div class="site-residues">{html.escape(text)}</div><div class="small-muted">Highest-supported residue has evidence from {site[0].support_count} structural template(s). Experimental PDB SITE records are preferred; ligand-contact inference is used when SITE records are absent.</div></div>',unsafe_allow_html=True)
+        reveal_button("ChimeraX: select predicted active site",chimera_command("#1",query_chain,[r.query_resnum for r in site]),"predicted_site",f"Open the original protein as model #1. This selects the predicted residues on chain {query_chain}.")
+    else:
+        st.info("No experimentally annotated active-site residues could be transferred from the returned structural matches.")
 
     st.subheader("3D structure")
     render_viewer(query_id)
