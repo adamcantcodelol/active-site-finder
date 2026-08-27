@@ -54,10 +54,7 @@ class Hit:
             "Description": self.description or "n/a",
             "RMSD (Å)": _fmt(self.rmsd),
             "TM-Score": _fmt(self.tm_score, digits=3),
-            "Seq. Identity": _fmt(
-                self.seq_identity * 100 if self.seq_identity is not None else None,
-                suffix="%",
-            ),
+            "Seq. Identity": _fmt(self.seq_identity * 100 if self.seq_identity is not None else None, suffix="%"),
             "E-value": _fmt(self.e_value, sci=True),
         }
 
@@ -124,12 +121,7 @@ def submit_search(structure_text: str, filename: str = "query.pdb", mode: str = 
     if not databases:
         raise ValueError("At least one database must be selected.")
     try:
-        resp = requests.post(
-            f"{FOLDSEEK_API_BASE}/ticket",
-            files={"q": (filename, structure_text, "application/octet-stream")},
-            data=[("mode", mode), *[("database[]", db) for db in databases]],
-            timeout=timeout,
-        )
+        resp = requests.post(f"{FOLDSEEK_API_BASE}/ticket", files={"q": (filename, structure_text, "application/octet-stream")}, data=[("mode", mode), *[("database[]", db) for db in databases]], timeout=timeout)
         resp.raise_for_status()
         payload = resp.json()
     except requests.exceptions.RequestException as exc:
@@ -215,21 +207,10 @@ def fetch_results(ticket_id: str, databases: Sequence[str], timeout: int = 30) -
 
 
 def _sort_hits(hits: list[Hit]) -> None:
-    hits.sort(key=lambda h: (
-        h.rmsd is None,
-        h.rmsd if h.rmsd is not None else float("inf"),
-        -(h.tm_score if h.tm_score is not None else -1.0),
-        h.e_value if h.e_value is not None else float("inf"),
-    ))
+    hits.sort(key=lambda h: (h.rmsd is None, h.rmsd if h.rmsd is not None else float("inf"), -(h.tm_score if h.tm_score is not None else -1.0), h.e_value if h.e_value is not None else float("inf")))
 
 
-_THREE_TO_ONE = {
-    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
-    "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
-    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
-    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
-    "MSE": "M", "SEP": "S", "TPO": "T", "PTR": "Y",
-}
+_THREE_TO_ONE = {"ALA":"A","ARG":"R","ASN":"N","ASP":"D","CYS":"C","GLN":"Q","GLU":"E","GLY":"G","HIS":"H","ILE":"I","LEU":"L","LYS":"K","MET":"M","PHE":"F","PRO":"P","SER":"S","THR":"T","TRP":"W","TYR":"Y","VAL":"V","MSE":"M","SEP":"S","TPO":"T","PTR":"Y"}
 
 
 def _parse_ca_by_chain(pdb_text: str, chain_id: Optional[str]) -> list[dict]:
@@ -251,43 +232,38 @@ def _parse_ca_by_chain(pdb_text: str, chain_id: Optional[str]) -> list[dict]:
         if key in seen:
             continue
         seen.add(key)
-        residues.append({
-            "resnum": resnum,
-            "icode": icode,
-            "resname": line[17:20].strip().upper(),
-            "one": _THREE_TO_ONE.get(line[17:20].strip().upper(), "X"),
-            "xyz": xyz,
-        })
+        resname = line[17:20].strip().upper()
+        residues.append({"resnum": resnum, "icode": icode, "resname": resname, "one": _THREE_TO_ONE.get(resname, "X"), "xyz": xyz})
     return residues
 
 
 def _alignment_start_score(alignment: str, residues: list[dict], start_hint: Optional[int]) -> tuple[int, float]:
-    """Find the modeled-residue index that best fits a Foldseek alignment.
+    """Anchor a local Foldseek alignment to the deposited, modeled C-alpha sequence.
 
-    PDB files can omit unresolved residues, so sequence positions are not
-    always identical to the index of the modeled C-alpha list. Search near the
-    reported Foldseek start position and use sequence agreement to anchor it.
+    PDB files can omit unresolved residues, so a Foldseek sequence position is
+    not necessarily a Python index. Search the modeled chain using the actual
+    alignment letters. A weak anchor is rejected instead of producing a bogus
+    residue correspondence.
     """
-    if not residues:
-        return 0, float("-inf")
-    ungapped = [c for c in alignment if c != "-"]
-    if not ungapped:
-        return 0, float("-inf")
+    if not alignment or not residues:
+        return -1, 0.0
+    probe = [c.upper() for c in alignment if c != "-"]
+    if not probe:
+        return -1, 0.0
+    window = min(len(probe), 80)
+    probe = probe[:window]
     hint = max(0, (start_hint or 1) - 1)
-    lo = max(0, hint - 25)
-    hi = min(len(residues) - 1, hint + 25)
-    best_idx, best_score = min(hint, len(residues) - 1), float("-inf")
-    for idx in range(lo, hi + 1):
-        score = 0.0
-        ri = idx
-        for char in ungapped[: min(40, len(ungapped))]:
-            if ri >= len(residues):
-                break
-            score += 2.0 if residues[ri]["one"] == char.upper() else -1.0
-            ri += 1
+    best_idx, best_identity, best_score = -1, -1.0, float("-inf")
+    for idx in range(len(residues) - len(probe) + 1):
+        matches = sum(residues[idx + j]["one"] == aa or aa == "X" for j, aa in enumerate(probe))
+        identity = matches / max(1, window)
+        distance_penalty = min(abs(idx - hint), 200) * 0.002
+        score = matches - distance_penalty
         if score > best_score:
-            best_idx, best_score = idx, score
-    return best_idx, best_score
+            best_idx, best_identity, best_score = idx, identity, score
+    if best_idx < 0 or best_identity < 0.60:
+        return -1, best_identity
+    return best_idx, best_identity
 
 
 def _aligned_ca_pairs(hit: Hit, query_pdb: str, target_pdb: str, query_chain_id: Optional[str]) -> tuple[np.ndarray, np.ndarray]:
@@ -297,16 +273,19 @@ def _aligned_ca_pairs(hit: Hit, query_pdb: str, target_pdb: str, query_chain_id:
     tres = _parse_ca_by_chain(target_pdb, hit.chain_id)
     if not qres or not tres:
         return np.empty((0, 3)), np.empty((0, 3))
-    qi, _ = _alignment_start_score(hit.q_aln, qres, hit.q_start)
-    ti, _ = _alignment_start_score(hit.t_aln, tres, hit.t_start)
+    qi, q_conf = _alignment_start_score(hit.q_aln, qres, hit.q_start)
+    ti, t_conf = _alignment_start_score(hit.t_aln, tres, hit.t_start)
+    if qi < 0 or ti < 0 or min(q_conf, t_conf) < 0.60:
+        return np.empty((0, 3)), np.empty((0, 3))
     qpts: list[np.ndarray] = []
     tpts: list[np.ndarray] = []
     for qc, tc in zip(hit.q_aln, hit.t_aln):
-        q_present = qc != "-"
-        t_present = tc != "-"
+        q_present, t_present = qc != "-", tc != "-"
         if q_present and t_present and 0 <= qi < len(qres) and 0 <= ti < len(tres):
-            qpts.append(qres[qi]["xyz"])
-            tpts.append(tres[ti]["xyz"])
+            qr, tr = qres[qi], tres[ti]
+            if (qc.upper() == "X" or qr["one"] == qc.upper()) and (tc.upper() == "X" or tr["one"] == tc.upper()):
+                qpts.append(qr["xyz"])
+                tpts.append(tr["xyz"])
         if q_present:
             qi += 1
         if t_present:
@@ -330,14 +309,7 @@ def _kabsch_rmsd(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def populate_missing_rmsd(hits: list[Hit], query_pdb: str, query_chain_id: Optional[str] = None, max_hits: int = 50) -> list[Hit]:
-    """Calculate C-alpha RMSD for hits when the Foldseek API omits it.
-
-    The web API commonly exposes the Foldseek alignment strings but not an
-    explicit RMSD field. We therefore calculate a rigid-body Kabsch RMSD from
-    the same alignment and the deposited PDB coordinates. The residue list is
-    anchored to the actual modeled C-alpha residues, so unresolved PDB residues
-    do not shift the alignment index.
-    """
+    """Calculate C-alpha RMSD only from residue-validated alignment pairs."""
     attempted = 0
     for hit in hits:
         if hit.rmsd is not None:
