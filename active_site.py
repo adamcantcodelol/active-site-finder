@@ -265,7 +265,7 @@ def predict_active_site(hits: list[Hit], query_pdb_text: str, query_chain_id: Op
             if hit.target_id not in supporters:
                 supporters.append(hit.target_id)
             names[key] = p["qname"]
-    results = [ActiveSiteResidue(resnum, names.get(key), len(supporters), supporters, key[1]) for key, supporters in votes.items()]
+    results = [ActiveSiteResidue(key[0], names.get(key), len(supporters), supporters, key[1]) for key, supporters in votes.items()]
     results.sort(key=lambda r: (-r.support_count, r.query_resnum, r.insertion_code))
     return results
 
