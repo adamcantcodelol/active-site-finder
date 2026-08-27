@@ -254,8 +254,14 @@ def _alignment_start_score(alignment: str, residues: list[dict], start_hint: Opt
     probe = probe[:window]
     hint = max(0, (start_hint or 1) - 1)
     best_idx, best_identity, best_score = -1, -1.0, float("-inf")
-    for idx in range(len(residues) - len(probe) + 1):
-        matches = sum(residues[idx + j]["one"] == aa or aa == "X" for j, aa in enumerate(probe))
+    for idx in range(len(residues)):
+        matches = 0
+        for j, aa in enumerate(probe):
+            pos = idx + j
+            if pos >= len(residues):
+                break
+            if residues[pos]["one"] == aa or aa == "X":
+                matches += 1
         identity = matches / max(1, window)
         distance_penalty = min(abs(idx - hint), 200) * 0.002
         score = matches - distance_penalty
