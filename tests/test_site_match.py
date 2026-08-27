@@ -31,6 +31,15 @@ def test_alignment_column_must_match_real_residues():
     assert not correspondence_is_valid({"resname": "HIS"}, {"resname": "HIS"}, "-", "H")
 
 
+def test_alignment_column_uses_real_one_letter_code_not_first_letter():
+    # ARG's real one-letter code is R, not "A" (the first letter of "ARG").
+    # A residue-name-first-letter shortcut would wrongly reject this valid match.
+    assert correspondence_is_valid({"resname": "ARG"}, {"resname": "ARG"}, "R", "R")
+    assert not correspondence_is_valid({"resname": "ARG"}, {"resname": "ARG"}, "A", "A")
+    # Same issue for ASP (real code D) and GLU (real code E).
+    assert correspondence_is_valid({"resname": "ASP"}, {"resname": "GLU"}, "D", "E")
+
+
 def test_format_pair_is_sprite_style():
     text = format_pair(pair(57, 57, True))
     assert text == "D57 HIS matches A57 HIS ✓"
