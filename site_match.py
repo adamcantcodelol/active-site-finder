@@ -4,6 +4,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 
+# Maps the standard three-letter amino acid code (as stored in a PDB file,
+# e.g. "ARG") to the one-letter code used in Foldseek alignment strings
+# (e.g. "R"). Do NOT just take the first letter of the three-letter code --
+# for many residues (ARG, ASP, GLU, GLN, LYS, PHE, TRP, TYR, ASN...) the
+# first letter is not the correct one-letter code.
+THREE_TO_ONE = {
+    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C", "GLN": "Q",
+    "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I", "LEU": "L", "LYS": "K",
+    "MET": "M", "PHE": "F", "PRO": "P", "SER": "S", "THR": "T", "TRP": "W",
+    "TYR": "Y", "VAL": "V", "MSE": "M", "SEP": "S", "TPO": "T", "PTR": "Y",
+}
+
 
 @dataclass(frozen=True)
 class SitePair:
@@ -68,7 +80,13 @@ def correspondence_is_valid(
         return False
     qname = str(query_residue.get("resname", "")).upper()
     hname = str(homolog_residue.get("resname", "")).upper()
-    return bool(qname and hname and qname[0] == aligned_query.upper() and hname[0] == aligned_homolog.upper())
+    q_one = THREE_TO_ONE.get(qname)
+    h_one = THREE_TO_ONE.get(hname)
+    aligned_query = aligned_query.upper()
+    aligned_homolog = aligned_homolog.upper()
+    q_ok = q_one == aligned_query or aligned_query == "X"
+    h_ok = h_one == aligned_homolog or aligned_homolog == "X"
+    return bool(q_one and h_one and q_ok and h_ok)
 
 
 def format_pair(pair: SitePair) -> str:
