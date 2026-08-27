@@ -198,12 +198,7 @@ def map_binding_site_details(hit: Hit, target_structure: str, query_structure: s
 
 
 def select_local_triplet(pairs: list[dict]) -> list[dict]:
-    """Select one compact, alignment-contiguous three-residue local cluster.
-
-    Prefer clusters with fewest query and homolog numbering gaps, then more
-    exact residue identities. This prevents a three-residue display from being
-    assembled from unrelated parts of a large experimental site.
-    """
+    """Select one compact, alignment-contiguous three-residue local cluster."""
     ordered = sorted(pairs, key=lambda p: (p["qn"], p.get("qicode", ""), p["tn"], p.get("ticode", "")))
     if len(ordered) <= 3:
         return ordered
@@ -230,13 +225,7 @@ def get_sprite_match(hit: Hit, query_structure: str, query_chain_id: Optional[st
 
 
 def best_site_bearing_hit(hits: list[Hit], query_structure: str, query_chain_id: Optional[str], max_hits: int = 50) -> tuple[Optional[Hit], list[dict]]:
-    """Find the lowest-RMSD hit with a validated, displayable local site.
-
-    The structural winner and the best site-bearing homolog are deliberately
-    separate concepts. This helper makes that distinction explicit and never
-    substitutes a site-bearing hit when the caller asked for the raw RMSD
-    winner.
-    """
+    """Find the lowest-RMSD hit with a validated, displayable local site."""
     candidates = [h for h in hits if h.rmsd is not None and h.q_aln and h.t_aln]
     candidates.sort(key=lambda h: (h.rmsd, -(h.tm_score if h.tm_score is not None else -1.0), h.e_value if h.e_value is not None else float("inf")))
     for hit in candidates[:max(1, max_hits)]:
@@ -250,21 +239,46 @@ def _map_binding_site_to_query(hit: Hit, target_structure: str, query_structure:
     return [(p["qn"], p["qicode"], p["qname"]) for p in map_binding_site_details(hit, target_structure, query_structure, query_chain_id)]
 
 
+def _set_sprite_status(hit: Hit, available: bool) -> None:
+    """Attach UI-safe status to a hit without changing its scientific identity."""
+    setattr(hit, "sprite_available", bool(available))
+    base = (hit.description or "structural homolog").strip()
+    marker = " · SPRITE: available" if available else " · SPRITE: no validated local site"
+    for old in (" · SPRITE: available", " · SPRITE: no validated local site"):
+        if base.endswith(old):
+            base = base[:-len(old)]
+    hit.description = base + marker
+
+
 def predict_active_site(hits: list[Hit], query_pdb_text: str, query_chain_id: Optional[str] = None, top_n_hits: int = 15) -> list[ActiveSiteResidue]:
     candidates = [h for h in hits if "pdb" in (h.database or "").lower() and h.q_aln and h.t_aln and h.rmsd is not None]
     candidates.sort(key=lambda h: (h.rmsd, -(h.tm_score if h.tm_score is not None else -1.0), h.e_value if h.e_value is not None else float("inf")))
+
+    # Evaluate every returned structural hit once so the UI can tell the user
+    # which choices actually have a valid SPRITE-style local match.
+    for hit in candidates:
+        try:
+            target = fetch_target_structure(hit)
+            mapped = map_binding_site_details(hit, target, query_pdb_text, query_chain_id) if target else []
+            _set_sprite_status(hit, len(select_local_triplet(mapped)) == 3)
+        except Exception:
+            _set_sprite_status(hit, False)
+
     votes: dict[tuple[int, str], list[str]] = {}
     names: dict[tuple[int, str], str] = {}
     for hit in candidates[:max(1, top_n_hits)]:
-        target = fetch_target_structure(hit)
-        if not target:
+        try:
+            target = fetch_target_structure(hit)
+            if not target:
+                continue
+            for p in map_binding_site_details(hit, target, query_pdb_text, query_chain_id):
+                key = (p["qn"], p["qicode"])
+                supporters = votes.setdefault(key, [])
+                if hit.target_id not in supporters:
+                    supporters.append(hit.target_id)
+                names[key] = p["qname"]
+        except Exception:
             continue
-        for p in map_binding_site_details(hit, target, query_pdb_text, query_chain_id):
-            key = (p["qn"], p["qicode"])
-            supporters = votes.setdefault(key, [])
-            if hit.target_id not in supporters:
-                supporters.append(hit.target_id)
-            names[key] = p["qname"]
     results = [ActiveSiteResidue(key[0], names.get(key), len(supporters), supporters, key[1]) for key, supporters in votes.items()]
     results.sort(key=lambda r: (-r.support_count, r.query_resnum, r.insertion_code))
     return results
