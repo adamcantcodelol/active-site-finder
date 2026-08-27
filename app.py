@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import html
-import urllib.parse
 
 import pandas as pd
 import streamlit as st
@@ -64,44 +63,42 @@ def _residue_key(r):
 
 
 def map_site(hit,query_pdb,query_chain):
-    """Map only experimentally annotated homolog residues through a validated alignment."""
+    """Map experimentally annotated homolog residues through the canonical validated alignment."""
     try:
         target_pdb=asite.fetch_target_structure(hit)
         if not target_pdb or not hit.q_aln or not hit.t_aln:
             return []
-        target=asite.parse_ca_residues(target_pdb,hit.chain_id)
-        query=asite.parse_ca_residues(query_pdb,query_chain)
-        site=asite._template_site_residues(target_pdb,hit.chain_id)
-        if not target or not query or not site:
-            return []
-        site_keys={_residue_key(r) for r in site}
-        ti,_=fs._alignment_start_score(hit.t_aln,target,hit.t_start)
-        qi,_=fs._alignment_start_score(hit.q_aln,query,hit.q_start)
-        out=[]
-        for qc,tc in zip(hit.q_aln,hit.t_aln):
-            if qc!="-" and tc!="-" and 0<=qi<len(query) and 0<=ti<len(target):
-                qr=query[qi]; tr=target[ti]
-                if correspondence_is_valid(qr,tr,qc,tc) and _residue_key(tr) in site_keys:
-                    out.append(SitePair(
-                        homolog_chain=hit.chain_id or "?",
-                        homolog_resnum=tr["resnum"], homolog_insertion=tr.get("insertion_code") or "",
-                        homolog_resname=tr["resname"], query_chain=query_chain or "?",
-                        query_resnum=qr["resnum"], query_insertion=qr.get("insertion_code") or "",
-                        query_resname=qr["resname"], exact=tr["resname"].upper()==qr["resname"].upper(),
-                    ))
-            if qc!="-": qi+=1
-            if tc!="-": ti+=1
-        return out
+        mapped=asite.map_binding_site_details(hit,target_pdb,query_pdb,query_chain)
+        return [SitePair(
+            homolog_chain=p.get("tchain",hit.chain_id or "?"),
+            homolog_resnum=p["tn"], homolog_insertion=p.get("ticode","") or "",
+            homolog_resname=p["tname"], query_chain=p.get("qchain",query_chain or "?"),
+            query_resnum=p["qn"], query_insertion=p.get("qicode","") or "",
+            query_resname=p["qname"], exact=bool(p.get("exact")),
+        ) for p in mapped]
     except Exception:
         return []
 
 
 def cached_map_site(hit,query_pdb,query_chain):
-    """Session cache prevents a Streamlit selectbox rerun from refetching the same PDB."""
+    """Cache the same canonical mapping used to determine SPRITE availability."""
     cache=st.session_state.setdefault("site_map_cache",{})
     key=(hit.target_id,query_chain,hit.q_aln,hit.t_aln,hit.q_start,hit.t_start)
     if key not in cache:
-        cache[key]=map_site(hit,query_pdb,query_chain)
+        pairs=map_site(hit,query_pdb,query_chain)
+        # The availability flag and displayed SPRITE match must use the exact
+        # same canonical mapping. This fallback also repairs older cached hit
+        # metadata produced by previous app versions.
+        if len(choose_local_triplet(pairs)) != 3:
+            canonical=asite.get_sprite_match(hit,query_pdb,query_chain)
+            pairs=[SitePair(
+                homolog_chain=p.get("tchain",hit.chain_id or "?"),
+                homolog_resnum=p["tn"], homolog_insertion=p.get("ticode","") or "",
+                homolog_resname=p["tname"], query_chain=p.get("qchain",query_chain or "?"),
+                query_resnum=p["qn"], query_insertion=p.get("qicode","") or "",
+                query_resname=p["qname"], exact=bool(p.get("exact")),
+            ) for p in canonical]
+        cache[key]=pairs
     return cache[key]
 
 
@@ -145,7 +142,7 @@ def render_sprite(hit,pairs,query_id):
     return chosen
 
 
-def render_viewer(pid, title, chain=None, residues=None, height=560):
+def render_viewer(pid,title,chain=None,residues=None,height=560):
     try:
         markup=viewer_html(pid,chain=chain,residues=residues,height=height)
     except ValueError as exc:
@@ -205,11 +202,14 @@ if "rmsd_hits" in st.session_state:
     st.dataframe(pd.DataFrame([{"Rank":i+1,"PDB / Chain":h.target_id,"Description":h.description or "n/a","RMSD (Å)":f"{h.rmsd:.2f}","TM-Score":f"{h.tm_score:.3f}" if h.tm_score is not None else "n/a","Seq. Identity":f"{h.seq_identity*100:.1f}%" if h.seq_identity is not None else "n/a","SPRITE site":"✓ available" if getattr(h,"sprite_available",False) else "not available"} for i,h in enumerate(rmsd_hits[:50])]),use_container_width=True,hide_index=True)
 
     st.subheader("SPRITE-style active-site match")
-    # Only offer homologs that actually have a validated three-residue local
-    # site. "sprite_available" was already computed for every hit while the
-    # predicted active site was being calculated above, so this filtering is
-    # free -- it doesn't re-fetch any structures.
-    available_hits=[h for h in rmsd_hits if getattr(h,"sprite_available",False)]
+    # Determine availability from the exact mapping that will be displayed.
+    # This prevents a stale sprite_available flag from offering a homolog
+    # that subsequently renders "no validated local site".
+    availability={}
+    with st.spinner("Checking local SPRITE matches..."):
+        for h in rmsd_hits[:50]:
+            availability[h.target_id]=len(choose_local_triplet(cached_map_site(h,query_pdb,query_chain)))==3
+    available_hits=[h for h in rmsd_hits if availability.get(h.target_id,False)]
     st.caption(f"{len(available_hits)} of {len(rmsd_hits)} structural matches have a validated three-residue experimental site. Only those are selectable below.")
     if not available_hits:
         st.info("None of the returned structural matches have a validated three-residue experimental site that can be mapped to the original protein.")
@@ -217,11 +217,12 @@ if "rmsd_hits" in st.session_state:
         selected_hit=None
     else:
         labels=[f"{rmsd_hits.index(h)+1}. {h.target_id} · chain {h.chain_id or '?'} · RMSD {h.rmsd:.2f} Å" for h in available_hits]
-        default_index=min(st.session_state.get("selected_hit_index",0),len(labels)-1)
+        previous=st.session_state.get("selected_hit_target")
+        default_index=next((i for i,h in enumerate(available_hits) if h.target_id==previous),0)
         selected_label=st.selectbox("Choose the similar protein",labels,index=default_index,key="homolog_selector")
         selected_index=labels.index(selected_label)
-        st.session_state["selected_hit_index"]=selected_index
         selected_hit=available_hits[selected_index]
+        st.session_state["selected_hit_target"]=selected_hit.target_id
         selected_pairs=cached_map_site(selected_hit,query_pdb,query_chain)
         chosen=render_sprite(selected_hit,selected_pairs,query_id)
 
