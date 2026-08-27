@@ -96,6 +96,15 @@ def map_site(hit,query_pdb,query_chain):
         return []
 
 
+def cached_map_site(hit,query_pdb,query_chain):
+    """Session cache prevents a Streamlit selectbox rerun from refetching the same PDB."""
+    cache=st.session_state.setdefault("site_map_cache",{})
+    key=(hit.target_id,query_chain,hit.q_aln,hit.t_aln,hit.q_start,hit.t_start)
+    if key not in cache:
+        cache[key]=map_site(hit,query_pdb,query_chain)
+    return cache[key]
+
+
 def reveal_button(label,command,key,help_text):
     if st.button(label,key=key,use_container_width=True):
         st.session_state[f"show_{key}"]=True
@@ -165,9 +174,12 @@ if run:
             st.error("Foldseek returned matches, but none had a valid RMSD and alignment. No scientifically meaningful ranking can be shown.");st.stop()
         st.session_state.update(query_id=pdb_id,query_pdb=query_pdb,query_chain=query_chain,hits=hits,rmsd_hits=rmsd_hits)
         st.session_state["selected_hit_index"]=0
+        st.session_state["site_map_cache"]={}
         st.session_state.pop("homolog_selector",None)
         for key in ("sprite_homolog","sprite_original","predicted_site"):
             st.session_state.pop(f"show_{key}",None)
+        with st.spinner("Mapping experimentally observed ligand-binding residues..."):
+            st.session_state["predicted_site_cache"]=asite.predict_active_site(hits,query_pdb_text=query_pdb,query_chain_id=query_chain,top_n_hits=15)
     except fs.FoldseekError as exc:st.error(f"Structural search failed: {exc}")
     except Exception as exc:st.error(f"Unexpected error: {type(exc).__name__}: {exc}")
 
@@ -199,12 +211,11 @@ if "rmsd_hits" in st.session_state:
     selected_index=labels.index(selected_label)
     st.session_state["selected_hit_index"]=selected_index
     selected_hit=rmsd_hits[selected_index]
-    selected_pairs=map_site(selected_hit,query_pdb,query_chain)
+    selected_pairs=cached_map_site(selected_hit,query_pdb,query_chain)
     chosen=render_sprite(selected_hit,selected_pairs,query_id)
 
     st.subheader("Predicted active site")
-    with st.spinner("Mapping experimentally observed ligand-binding residues..."):
-        predicted=asite.predict_active_site(hits,query_pdb_text=query_pdb,query_chain_id=query_chain,top_n_hits=15)
+    predicted=st.session_state.get("predicted_site_cache",[])
     if predicted:
         confident=[r for r in predicted if r.support_count>=2]
         site=confident if confident else predicted[:15]
