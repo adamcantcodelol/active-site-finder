@@ -1,6 +1,6 @@
 """Safe HTML renderer for the embedded 3D structure viewer.
 
-The viewer uses 3Dmol.js in the browser.  PDB references may arrive from
+The viewer uses 3Dmol.js in the browser. PDB references may arrive from
 Foldseek as values such as ``4xz1-assembly1.cif.gz_A``; this module extracts
 the actual four-character PDB accession before contacting RCSB.
 """
@@ -10,16 +10,17 @@ import json
 import re
 from urllib.parse import quote
 
-
 _PDB_RE = re.compile(r"^[0-9A-Za-z]{4}$")
 _CHAIN_RE = re.compile(r"^[A-Za-z0-9_]+$")
-_RES_RE = re.compile(r"^[+-]?\d+[A-Za-z]?")
+_RES_RE = re.compile(r"^[+-]?\d+[A-Za-z]?$" )
 
 
 def normalize_pdb_id(pdb_id: str) -> str:
     """Normalize either a plain PDB ID or a Foldseek target reference."""
-    value = str(pdb_id).strip().split()[0] if str(pdb_id).strip() else ""
-    # Foldseek targets can look like 4xz1-assembly1.cif.gz_A.
+    raw = str(pdb_id).strip()
+    if not raw:
+        raise ValueError("PDB ID is empty")
+    value = raw.split()[0]
     candidate = value[:4]
     if not _PDB_RE.fullmatch(candidate):
         raise ValueError("PDB ID must be exactly four letters/numbers")
@@ -27,6 +28,7 @@ def normalize_pdb_id(pdb_id: str) -> str:
 
 
 def normalize_residues(residues) -> list[str]:
+    """Validate, deduplicate, and preserve residue identifiers."""
     out: list[str] = []
     seen: set[str] = set()
     for value in residues or []:
@@ -74,7 +76,6 @@ html,body,#viewer{{width:100%;height:100%;margin:0;overflow:hidden;background:#f
     if (chain && selected.length) {{
       const sel = {{chain: chain, resi: selected}};
       viewer.setStyle(sel, {{cartoon: {{color: 'orange'}}, stick: {{radius: 0.22}}, sphere: {{radius: 0.32}}}});
-      viewer.addLabel('', {{sel: sel, fontSize: 11, backgroundOpacity: 0.65, inFront: true}});
       viewer.zoomTo(sel);
     }} else if (chain) {{
       viewer.zoomTo({{chain: chain}});
