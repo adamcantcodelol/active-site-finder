@@ -157,7 +157,7 @@ def _anchor_alignment(alignment: str, residues: list[dict], start_hint: Optional
     for idx in range(len(residues)):
         if idx + len(probe) > len(residues):
             break
-        matches = sum(residues[idx + j]["one"] == aa for j, aa in enumerate(probe))
+        matches = sum(residues[idx + j]["one"] == aa or aa == "X" for j, aa in enumerate(probe))
         distance_penalty = min(abs(idx - hint), 200) * 0.002
         score = matches - distance_penalty
         if score > best_score:
@@ -198,35 +198,52 @@ def map_binding_site_details(hit: Hit, target_structure: str, query_structure: s
 
 
 def select_local_triplet(pairs: list[dict]) -> list[dict]:
-    """Select one compact three-residue local cluster from a mapped site."""
+    """Select one compact, alignment-contiguous three-residue local cluster.
+
+    Prefer clusters with fewest query and homolog numbering gaps, then more
+    exact residue identities. This prevents a three-residue display from being
+    assembled from unrelated parts of a large experimental site.
+    """
     ordered = sorted(pairs, key=lambda p: (p["qn"], p.get("qicode", ""), p["tn"], p.get("ticode", "")))
     if len(ordered) <= 3:
         return ordered
     best = None
     for i in range(len(ordered) - 2):
         group = ordered[i:i + 3]
-        gaps = sum(max(0, group[j + 1]["qn"] - group[j]["qn"] - 1) for j in range(2))
-        span = group[-1]["qn"] - group[0]["qn"]
+        q_gaps = sum(max(0, group[j + 1]["qn"] - group[j]["qn"] - 1) for j in range(2))
+        t_gaps = sum(max(0, group[j + 1]["tn"] - group[j]["tn"] - 1) for j in range(2))
+        span = (group[-1]["qn"] - group[0]["qn"]) + (group[-1]["tn"] - group[0]["tn"])
         exact = sum(1 for p in group if p.get("exact"))
-        score = (gaps, span, -exact, group[0]["qn"])
+        score = (q_gaps + t_gaps, span, -exact, group[0]["qn"], group[0]["tn"])
         if best is None or score < best[0]:
             best = (score, group)
     return best[1] if best else ordered[:3]
 
 
 def get_sprite_match(hit: Hit, query_structure: str, query_chain_id: Optional[str]) -> list[dict]:
-    """Return the single validated three-residue SPRITE-style match for a hit.
-
-    This is the canonical UI-facing path: the caller supplies one selected
-    homolog, and the function either returns one compact local match or an
-    empty list. It never substitutes a different homolog behind the caller's
-    back.
-    """
+    """Return the single validated three-residue SPRITE-style match for one hit."""
     target_structure = fetch_target_structure(hit)
     if not target_structure:
         return []
     mapped = map_binding_site_details(hit, target_structure, query_structure, query_chain_id)
     return select_local_triplet(mapped)
+
+
+def best_site_bearing_hit(hits: list[Hit], query_structure: str, query_chain_id: Optional[str], max_hits: int = 50) -> tuple[Optional[Hit], list[dict]]:
+    """Find the lowest-RMSD hit with a validated, displayable local site.
+
+    The structural winner and the best site-bearing homolog are deliberately
+    separate concepts. This helper makes that distinction explicit and never
+    substitutes a site-bearing hit when the caller asked for the raw RMSD
+    winner.
+    """
+    candidates = [h for h in hits if h.rmsd is not None and h.q_aln and h.t_aln]
+    candidates.sort(key=lambda h: (h.rmsd, -(h.tm_score if h.tm_score is not None else -1.0), h.e_value if h.e_value is not None else float("inf")))
+    for hit in candidates[:max(1, max_hits)]:
+        match = get_sprite_match(hit, query_structure, query_chain_id)
+        if len(match) == 3:
+            return hit, match
+    return None, []
 
 
 def _map_binding_site_to_query(hit: Hit, target_structure: str, query_structure: str, query_chain_id: Optional[str]) -> list[tuple[int, str, str]]:
