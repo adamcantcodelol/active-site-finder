@@ -13,6 +13,8 @@ def residue_query(residues) -> str:
     out = []
     seen = set()
     for residue in residues or []:
+        if residue is None:
+            continue
         value = _clean(residue)
         if not value or value in seen:
             continue
