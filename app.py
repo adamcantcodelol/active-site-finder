@@ -12,6 +12,7 @@ import active_site as asite
 import foldseek_client as fs
 from chimera_commands import chimera_select
 from site_match import SitePair, choose_local_triplet, correspondence_is_valid
+from structure_viewer import viewer_html
 
 st.set_page_config(page_title="MBRC Active Site Finder", page_icon="🧬", layout="wide")
 
@@ -37,7 +38,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# The M is inside the shield; BRC is outside. The extra vertical room prevents clipping.
 logo="""<svg class='mbrc-logo' viewBox='0 0 470 140' xmlns='http://www.w3.org/2000/svg' role='img' aria-label='MBRC logo'>
 <path d='M92 12 L162 30 L162 62 C162 94 140 119 92 132 C44 119 22 94 22 62 L22 30 Z' fill='none' stroke='#111827' stroke-width='5' stroke-linejoin='round'/>
 <text x='92' y='86' text-anchor='middle' font-family='Arial,Helvetica,sans-serif' font-size='60' font-weight='800' fill='#111827'>M</text>
@@ -136,10 +136,14 @@ def render_sprite(hit,pairs,query_id):
     return chosen
 
 
-def render_viewer(pid, title, height=620):
-    safe=urllib.parse.quote(str(pid).lower(),safe="")
+def render_viewer(pid, title, chain=None, residues=None, height=560):
+    try:
+        markup=viewer_html(pid,chain=chain,residues=residues,height=height)
+    except ValueError as exc:
+        st.error(f"3D viewer configuration error: {exc}")
+        return
     st.markdown(f'<div class="viewer-card"><div class="viewer-title">{html.escape(title)}</div>',unsafe_allow_html=True)
-    components.iframe(f"https://molstar.org/viewer/?pdb={safe}",height=height,scrolling=False)
+    components.html(markup,height=height,scrolling=False)
     st.markdown('</div>',unsafe_allow_html=True)
 
 
@@ -213,11 +217,13 @@ if "rmsd_hits" in st.session_state:
 
     st.subheader("3D structures")
     v1,v2=st.columns(2)
+    chosen_homolog_residues=[p.homolog_resnum for p in chosen] if chosen else []
+    chosen_query_residues=[p.query_resnum for p in chosen] if chosen else []
     with v1:
-        render_viewer(query_id,"Original protein")
+        render_viewer(query_id,"Original protein",chain=query_chain,residues=chosen_query_residues)
     with v2:
         homolog_id=selected_hit.pdb_id if selected_hit else None
         if homolog_id:
-            render_viewer(homolog_id,"Selected structural homolog")
+            render_viewer(homolog_id,"Selected structural homolog",chain=selected_hit.chain_id,residues=chosen_homolog_residues)
         else:
             st.info("Select a structural homolog to view it.")
