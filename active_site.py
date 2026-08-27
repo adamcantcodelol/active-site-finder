@@ -46,7 +46,6 @@ def parse_site_residues(pdb_text: str, chain_id: Optional[str] = None) -> list[d
     for line in pdb_text.splitlines():
         if not line.startswith("SITE"):
             continue
-        # PDB SITE records contain four residue slots at these fixed columns.
         for offset in (18, 29, 40, 51):
             if len(line) < offset + 10:
                 continue
@@ -84,12 +83,7 @@ def parse_ca_residues(pdb_text: str, chain_id: Optional[str] = None) -> list[dic
         if key in seen:
             continue
         seen.add(key)
-        residues.append({
-            "resnum": resnum,
-            "insertion_code": insertion,
-            "resname": resname,
-            "one": THREE_TO_ONE.get(resname, "X"),
-        })
+        residues.append({"resnum": resnum, "insertion_code": insertion, "resname": resname, "one": THREE_TO_ONE.get(resname, "X")})
     return residues
 
 
@@ -108,11 +102,7 @@ def _parse_atom(line: str) -> Optional[dict]:
     if len(line) < 54:
         return None
     try:
-        return {
-            "atom": line[12:16].strip(), "resname": line[17:20].strip(), "chain": line[21].strip(),
-            "resnum": int(line[22:26].strip()), "icode": line[26].strip(),
-            "x": float(line[30:38]), "y": float(line[38:46]), "z": float(line[46:54]),
-        }
+        return {"atom": line[12:16].strip(), "resname": line[17:20].strip(), "chain": line[21].strip(), "resnum": int(line[22:26].strip()), "icode": line[26].strip(), "x": float(line[30:38]), "y": float(line[38:46]), "z": float(line[46:54])}
     except (TypeError, ValueError):
         return None
 
@@ -155,13 +145,6 @@ def _template_site_residues(pdb_text: str, chain_id: Optional[str]) -> tuple[lis
 
 
 def _anchor_alignment(alignment: str, residues: list[dict], start_hint: Optional[int]) -> tuple[int, float]:
-    """Anchor a Foldseek local alignment to modeled PDB residues.
-
-    Foldseek's start position refers to its internal sequence, while a PDB
-    coordinate file can omit unresolved residues. Therefore ``start-1`` is
-    not necessarily the correct Python index. We search the whole modeled
-    chain and choose the sequence segment with the strongest agreement.
-    """
     if not alignment or not residues:
         return -1, 0.0
     ungapped = [c.upper() for c in alignment if c != "-"]
@@ -171,25 +154,21 @@ def _anchor_alignment(alignment: str, residues: list[dict], start_hint: Optional
     probe = ungapped[:window]
     hint = max(0, (start_hint or 1) - 1)
     best_idx, best_score = -1, -1e9
-    for idx in range(0, len(residues)):
+    for idx in range(len(residues)):
         if idx + len(probe) > len(residues):
             break
         matches = sum(residues[idx + j]["one"] == aa for j, aa in enumerate(probe))
-        # Small tie-break toward Foldseek's reported start, but sequence
-        # agreement dominates the decision.
         distance_penalty = min(abs(idx - hint), 200) * 0.002
         score = matches - distance_penalty
         if score > best_score:
             best_idx, best_score = idx, score
     identity = max(0.0, best_score / max(1, window))
-    # Never emit a residue mapping from an obviously wrong sequence anchor.
     if identity < 0.60:
         return -1, identity
     return best_idx, identity
 
 
 def map_binding_site_details(hit: Hit, target_structure: str, query_structure: str, query_chain_id: Optional[str]) -> list[dict]:
-    """Return validated residue-by-residue correspondence for one hit."""
     if not hit.q_aln or not hit.t_aln:
         return []
     target = parse_ca_residues(target_structure, hit.chain_id)
@@ -207,21 +186,39 @@ def map_binding_site_details(hit: Hit, target_structure: str, query_structure: s
         q_present, t_present = qc != "-", tc != "-"
         if q_present and t_present and 0 <= qi < len(query) and 0 <= ti < len(target):
             qr, tr = query[qi], target[ti]
-            # A mapped residue must agree with both the alignment character and
-            # the deposited residue name. This blocks shifted-index artifacts.
             q_ok = qr["one"] == qc.upper() or qc.upper() == "X"
             t_ok = tr["one"] == tc.upper() or tc.upper() == "X"
             if q_ok and t_ok and (tr["resnum"], tr["insertion_code"]) in site_keys:
-                out.append({
-                    "tchain": hit.chain_id or "?", "tn": tr["resnum"], "ticode": tr["insertion_code"], "tname": tr["resname"],
-                    "qchain": query_chain_id or "?", "qn": qr["resnum"], "qicode": qr["insertion_code"], "qname": qr["resname"],
-                    "exact": tr["one"] == qr["one"], "evidence_type": evidence_type,
-                })
+                out.append({"tchain": hit.chain_id or "?", "tn": tr["resnum"], "ticode": tr["insertion_code"], "tname": tr["resname"], "qchain": query_chain_id or "?", "qn": qr["resnum"], "qicode": qr["insertion_code"], "qname": qr["resname"], "exact": tr["one"] == qr["one"], "evidence_type": evidence_type})
         if q_present:
             qi += 1
         if t_present:
             ti += 1
     return out
+
+
+def select_local_triplet(pairs: list[dict]) -> list[dict]:
+    """Select one compact three-residue local cluster from a mapped site.
+
+    The score prefers residues close together in the query sequence, then
+    favors conserved amino-acid identities. This intentionally returns at most
+    three residues so the UI represents a SPRITE-style local match instead of
+    dumping an entire annotated active site.
+    """
+    ordered = sorted(pairs, key=lambda p: (p["qn"], p.get("qicode", ""), p["tn"], p.get("ticode", "")))
+    if len(ordered) <= 3:
+        return ordered
+    best = None
+    for i in range(len(ordered) - 2):
+        group = ordered[i:i + 3]
+        gaps = sum(max(0, group[j + 1]["qn"] - group[j]["qn"] - 1) for j in range(2))
+        span = group[-1]["qn"] - group[0]["qn"]
+        exact = sum(1 for p in group if p.get("exact"))
+        # Sequence locality is primary; conservation breaks ties.
+        score = (gaps, span, -exact, group[0]["qn"])
+        if best is None or score < best[0]:
+            best = (score, group)
+    return best[1] if best else ordered[:3]
 
 
 def _map_binding_site_to_query(hit: Hit, target_structure: str, query_structure: str, query_chain_id: Optional[str]) -> list[tuple[int, str, str]]:
