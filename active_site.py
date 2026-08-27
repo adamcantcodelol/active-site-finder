@@ -47,7 +47,7 @@ def parse_site_residues(pdb_text: str, chain_id: Optional[str] = None) -> list[d
         if not line.startswith("SITE"):
             continue
         for offset in (18, 29, 40, 51):
-            if len(line) < offset + 10:
+            if len(line) < offset + 9:
                 continue
             resname = line[offset:offset + 3].strip().upper()
             chain = line[offset + 4:offset + 5].strip()
