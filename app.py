@@ -202,17 +202,28 @@ if "rmsd_hits" in st.session_state:
 
     st.subheader("Structural matches — ranked by RMSD")
     st.caption("Ranking is based only on valid structural RMSD. A low-RMSD structure can still lack an experimentally mappable active-site annotation.")
-    st.dataframe(pd.DataFrame([{"Rank":i+1,"PDB / Chain":h.target_id,"Description":h.description or "n/a","RMSD (Å)":f"{h.rmsd:.2f}","TM-Score":f"{h.tm_score:.3f}" if h.tm_score is not None else "n/a","Seq. Identity":f"{h.seq_identity*100:.1f}%" if h.seq_identity is not None else "n/a"} for i,h in enumerate(rmsd_hits[:50])]),use_container_width=True,hide_index=True)
+    st.dataframe(pd.DataFrame([{"Rank":i+1,"PDB / Chain":h.target_id,"Description":h.description or "n/a","RMSD (Å)":f"{h.rmsd:.2f}","TM-Score":f"{h.tm_score:.3f}" if h.tm_score is not None else "n/a","Seq. Identity":f"{h.seq_identity*100:.1f}%" if h.seq_identity is not None else "n/a","SPRITE site":"✓ available" if getattr(h,"sprite_available",False) else "not available"} for i,h in enumerate(rmsd_hits[:50])]),use_container_width=True,hide_index=True)
 
     st.subheader("SPRITE-style active-site match")
-    labels=[f"{i+1}. {h.target_id} · chain {h.chain_id or '?'} · RMSD {h.rmsd:.2f} Å" for i,h in enumerate(rmsd_hits)]
-    default_index=min(st.session_state.get("selected_hit_index",0),len(labels)-1)
-    selected_label=st.selectbox("Choose the similar protein",labels,index=default_index,key="homolog_selector")
-    selected_index=labels.index(selected_label)
-    st.session_state["selected_hit_index"]=selected_index
-    selected_hit=rmsd_hits[selected_index]
-    selected_pairs=cached_map_site(selected_hit,query_pdb,query_chain)
-    chosen=render_sprite(selected_hit,selected_pairs,query_id)
+    # Only offer homologs that actually have a validated three-residue local
+    # site. "sprite_available" was already computed for every hit while the
+    # predicted active site was being calculated above, so this filtering is
+    # free -- it doesn't re-fetch any structures.
+    available_hits=[h for h in rmsd_hits if getattr(h,"sprite_available",False)]
+    st.caption(f"{len(available_hits)} of {len(rmsd_hits)} structural matches have a validated three-residue experimental site. Only those are selectable below.")
+    if not available_hits:
+        st.info("None of the returned structural matches have a validated three-residue experimental site that can be mapped to the original protein.")
+        chosen=None
+        selected_hit=None
+    else:
+        labels=[f"{rmsd_hits.index(h)+1}. {h.target_id} · chain {h.chain_id or '?'} · RMSD {h.rmsd:.2f} Å" for h in available_hits]
+        default_index=min(st.session_state.get("selected_hit_index",0),len(labels)-1)
+        selected_label=st.selectbox("Choose the similar protein",labels,index=default_index,key="homolog_selector")
+        selected_index=labels.index(selected_label)
+        st.session_state["selected_hit_index"]=selected_index
+        selected_hit=available_hits[selected_index]
+        selected_pairs=cached_map_site(selected_hit,query_pdb,query_chain)
+        chosen=render_sprite(selected_hit,selected_pairs,query_id)
 
     st.subheader("Predicted active site")
     predicted=st.session_state.get("predicted_site_cache",[])
