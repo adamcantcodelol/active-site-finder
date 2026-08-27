@@ -198,13 +198,7 @@ def map_binding_site_details(hit: Hit, target_structure: str, query_structure: s
 
 
 def select_local_triplet(pairs: list[dict]) -> list[dict]:
-    """Select one compact three-residue local cluster from a mapped site.
-
-    The score prefers residues close together in the query sequence, then
-    favors conserved amino-acid identities. This intentionally returns at most
-    three residues so the UI represents a SPRITE-style local match instead of
-    dumping an entire annotated active site.
-    """
+    """Select one compact three-residue local cluster from a mapped site."""
     ordered = sorted(pairs, key=lambda p: (p["qn"], p.get("qicode", ""), p["tn"], p.get("ticode", "")))
     if len(ordered) <= 3:
         return ordered
@@ -214,11 +208,25 @@ def select_local_triplet(pairs: list[dict]) -> list[dict]:
         gaps = sum(max(0, group[j + 1]["qn"] - group[j]["qn"] - 1) for j in range(2))
         span = group[-1]["qn"] - group[0]["qn"]
         exact = sum(1 for p in group if p.get("exact"))
-        # Sequence locality is primary; conservation breaks ties.
         score = (gaps, span, -exact, group[0]["qn"])
         if best is None or score < best[0]:
             best = (score, group)
     return best[1] if best else ordered[:3]
+
+
+def get_sprite_match(hit: Hit, query_structure: str, query_chain_id: Optional[str]) -> list[dict]:
+    """Return the single validated three-residue SPRITE-style match for a hit.
+
+    This is the canonical UI-facing path: the caller supplies one selected
+    homolog, and the function either returns one compact local match or an
+    empty list. It never substitutes a different homolog behind the caller's
+    back.
+    """
+    target_structure = fetch_target_structure(hit)
+    if not target_structure:
+        return []
+    mapped = map_binding_site_details(hit, target_structure, query_structure, query_chain_id)
+    return select_local_triplet(mapped)
 
 
 def _map_binding_site_to_query(hit: Hit, target_structure: str, query_structure: str, query_chain_id: Optional[str]) -> list[tuple[int, str, str]]:
