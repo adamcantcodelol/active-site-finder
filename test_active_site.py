@@ -1,6 +1,6 @@
 import unittest
 
-from active_site import _anchor_alignment, map_binding_site_details
+from active_site import _anchor_alignment, map_binding_site_details, select_local_triplet
 from foldseek_client import Hit
 
 
@@ -30,6 +30,26 @@ ATOM      3  CA  ASP B  22       2.000   0.000   0.000  1.00 20.00           C
         mapped = map_binding_site_details(hit, target, query, "B")
         self.assertEqual([(p["tn"], p["qn"]) for p in mapped], [(2, 21), (3, 22)])
         self.assertTrue(all(p["exact"] for p in mapped))
+
+    @staticmethod
+    def _pair(qn, tn, exact=False):
+        return {"qn": qn, "qicode": "", "qname": "ALA", "tn": tn,
+                "ticode": "", "tname": "VAL", "exact": exact}
+
+    def test_local_selection_is_exactly_three_residues(self):
+        pairs = [self._pair(10, 50), self._pair(11, 51), self._pair(12, 52), self._pair(80, 120)]
+        result = select_local_triplet(pairs)
+        self.assertEqual(len(result), 3)
+        self.assertEqual([p["qn"] for p in result], [10, 11, 12])
+
+    def test_local_selection_prefers_closeness_over_distant_conservation(self):
+        pairs = [self._pair(10, 50, True), self._pair(11, 51, True),
+                 self._pair(12, 52, True), self._pair(200, 250, True)]
+        result = select_local_triplet(pairs)
+        self.assertEqual([p["qn"] for p in result], [10, 11, 12])
+
+    def test_empty_local_site_is_safe(self):
+        self.assertEqual(select_local_triplet([]), [])
 
 
 if __name__ == "__main__":
