@@ -1,13 +1,8 @@
-"""3D structure viewer URL/HTML helpers.
-
-The hosted 3Dmol viewer is used here rather than running custom JavaScript in a
-Streamlit component iframe.  This avoids browser/CDN/CORS failures inside the
-Streamlit sandbox while still allowing exact chain/residue styling through
-3Dmol's documented URL selectors.
-"""
+"""Interactive 3D structure comparison helpers for MBRC Active Site Finder."""
 from __future__ import annotations
 
 import html
+import json
 import re
 from urllib.parse import quote
 
@@ -37,44 +32,141 @@ def normalize_residues(residues) -> list[str]:
     return out
 
 
-def viewer_url(pdb_id: str, chain: str | None = None, residues=None) -> str:
-    """Build a hosted 3Dmol scene with the selected active-site residues highlighted."""
-    pdb = normalize_pdb_id(pdb_id)
-    selected = normalize_residues(residues)
-    chain_value = None
-    if chain and chain != "?":
-        chain_value = str(chain).strip()
-        if not _CHAIN_RE.fullmatch(chain_value):
-            raise ValueError("Invalid chain identifier")
+def viewer_html(
+    pdb_id: str,
+    chain: str | None = None,
+    residues=None,
+    height: int = 560,
+    homolog_pdb_id: str | None = None,
+    homolog_chain: str | None = None,
+    homolog_residues=None,
+) -> str:
+    """Create a self-contained 3Dmol viewer with four structure-comparison modes.
 
-    base = "https://3dmol.org/viewer.html"
-    params = [f"pdb={quote(pdb.upper())}", "style=cartoon:color~lightgray"]
-    if chain_value and selected:
-        selector = f"resi:{','.join(selected)};chain:{chain_value}"
-        # Magenta is deliberately distinct from the neutral protein cartoon.
-        params.extend([
-            f"select={quote(selector, safe=':;,')}",
-            "style=stick:radius~0.28,colorscheme~magentaCarbon",
-            f"select={quote(selector, safe=':;,')}",
-            "style=sphere:radius~0.38,colorscheme~magentaCarbon",
-            f"select={quote(selector, safe=':;,')}",
-            "labelres=fontSize:12;backgroundOpacity:0.65",
-        ])
-    elif chain_value:
-        params.extend([
-            f"select={quote('chain:' + chain_value, safe=':')}",
-            "style=cartoon:color~lightgray",
-        ])
-    return base + "?" + "&".join(params)
+    Modes:
+      1. Both full proteins; each 3-residue site highlighted.
+      2. Only the two 3-residue sites are shown.
+      3. Both full proteins overlaid by the three matched site residues.
+      4. Only the two matched sites overlaid.
+    """
+    query = normalize_pdb_id(pdb_id)
+    qchain = str(chain or "").strip()
+    if qchain and not _CHAIN_RE.fullmatch(qchain):
+        raise ValueError("Invalid query chain identifier")
+    qres = normalize_residues(residues)
 
+    homolog = normalize_pdb_id(homolog_pdb_id) if homolog_pdb_id else ""
+    hchain = str(homolog_chain or "").strip()
+    if hchain and not _CHAIN_RE.fullmatch(hchain):
+        raise ValueError("Invalid homolog chain identifier")
+    hres = normalize_residues(homolog_residues)
 
-def viewer_html(pdb_id: str, chain: str | None = None, residues=None, height: int = 560) -> str:
-    """Return a Streamlit-safe iframe embedding the hosted 3Dmol viewer."""
-    url = viewer_url(pdb_id, chain=chain, residues=residues)
-    safe_height = max(300, min(int(height), 900))
-    return (
-        f'<iframe src="{html.escape(url, quote=True)}" '
-        f'width="100%" height="{safe_height}" '
-        f'style="border:0;border-radius:10px;background:#fff" '
-        f'loading="lazy" allowfullscreen></iframe>'
-    )
+    safe_height = max(420, min(int(height), 900))
+    payload = {
+        "query": query.upper(), "qchain": qchain, "qres": qres,
+        "homolog": homolog.upper(), "hchain": hchain, "hres": hres,
+    }
+    data = json.dumps(payload).replace("</", "<\\/")
+
+    # 3Dmol is loaded in the iframe itself. This avoids relying on Streamlit's
+    # parent page JavaScript and makes the four modes independent of Streamlit.
+    return f'''<!doctype html>
+<html><head><meta charset="utf-8">
+<script src="https://3dmol.org/build/3Dmol-min.js"></script>
+<style>
+html,body{{margin:0;padding:0;background:#fff;font-family:Arial,Helvetica,sans-serif}}
+#viewer{{width:100%;height:{safe_height-52}px;position:relative}}
+#status{{height:52px;display:flex;align-items:center;padding:0 12px;box-sizing:border-box;color:#64748b;font-size:13px;border-top:1px solid #e2e8f0}}
+</style></head><body>
+<div id="viewer"></div><div id="status">Loading structures…</div>
+<script>
+const DATA={data};
+let viewer=null, qModel=null, hModel=null;
+const ORANGE='orange', CYAN='cyan';
+
+function esc(v){{return String(v).replace(/[^A-Za-z0-9_]/g,'');}}
+function selector(chain,res{{}}){{return {{chain:chain,resi:res}};}}
+function atoms(model, chain, resis){{
+  if(!model || !chain || !resis || !resis.length) return [];
+  const wanted=new Set(resis.map(String));
+  return model.selectedAtoms({{chain:chain}}).filter(a=>wanted.has(String(a.resi)));
+}}
+function centroid(a){{let x=0,y=0,z=0; for(const p of a){{x+=p.x;y+=p.y;z+=p.z;}} const n=Math.max(1,a.length); return {{x:x/n,y:y/n,z:z/n}};}}
+function sub(a,b){{return {{x:a.x-b.x,y:a.y-b.y,z:a.z-b.z}};}}
+function add(a,b){{return {{x:a.x+b.x,y:a.y+b.y,z:a.z+b.z}};}}
+function mul(a,s){{return {{x:a.x*s,y:a.y*s,z:a.z*s}};}}
+function dot(a,b){{return a.x*b.x+a.y*b.y+a.z*b.z;}}
+function cross(a,b){{return {{x:a.y*b.z-a.z*b.y,y:a.z*b.x-a.x*b.z,z:a.x*b.y-a.y*b.x}};}}
+function norm(a){{const n=Math.sqrt(dot(a,a))||1;return mul(a,1/n);}}
+function basis(points){{
+  const o=points[0];
+  const e1=norm(sub(points[1],o));
+  const raw=sub(points[2],o);
+  const e2=norm(sub(raw,mul(e1,dot(raw,e1))));
+  const e3=norm(cross(e1,e2));
+  return {{o:o,e1:e1,e2:e2,e3:e3}};
+}}
+function toBasis(p,b){{const v=sub(p,b.o);return {{x:dot(v,b.e1),y:dot(v,b.e2),z:dot(v,b.e3)}};}}
+function fromBasis(v,b){{return add(b.o,add(mul(b.e1,v.x),add(mul(b.e2,v.y),mul(b.e3,v.z))));}}
+function overlayBySite(){{
+  const qa=atoms(qModel,DATA.qchain,DATA.qres), ha=atoms(hModel,DATA.hchain,DATA.hres);
+  // Align by the three matched residues using their alpha-carbon coordinates.
+  const qc=[],hc=[];
+  for(const r of DATA.qres){{
+    const q=qa.filter(a=>String(a.resi)===String(r) && (a.atom==='CA'||a.name==='CA'))[0];
+    const h=ha.filter(a=>String(a.resi)===String(DATA.hres[DATA.qres.indexOf(r)]) && (a.atom==='CA'||a.name==='CA'))[0];
+    if(q&&h){{qc.push(q);hc.push(h);}}
+  }}
+  if(qc.length<3 || hc.length<3) return false;
+  const qb=basis(qc.map(p=>({{x:p.x,y:p.y,z:p.z}}))), hb=basis(hc.map(p=>({{x:p.x,y:p.y,z:p.z}})));
+  for(const a of hModel.atoms){{
+    const local=toBasis({{x:a.x,y:a.y,z:a.z}},hb);
+    const p=fromBasis(local,qb); a.x=p.x;a.y=p.y;a.z=p.z;
+  }}
+  return true;
+}}
+function clearStyles(){{
+  qModel.setStyle({{}},{{cartoon:{{color:'#cbd5e1'}}}});
+  hModel.setStyle({{}},{{cartoon:{{color:'#93c5fd'}}}});
+}}
+function showMode(mode){{
+  if(!viewer||!qModel||!hModel) return;
+  clearStyles();
+  const qSel={{chain:DATA.qchain,resi:DATA.qres}};
+  const hSel={{chain:DATA.hchain,resi:DATA.hres}};
+  if(mode===2 || mode===4){{ qModel.setStyle({{}},{{}}); hModel.setStyle({{}},{{}}); }}
+  if(mode===1 || mode===2 || mode===3 || mode===4){{
+    qModel.setStyle(qSel,{{stick:{{radius:0.24,colorscheme:'orangeCarbon'}},sphere:{{radius:0.38,color:ORANGE}}}});
+    hModel.setStyle(hSel,{{stick:{{radius:0.24,colorscheme:'cyanCarbon'}},sphere:{{radius:0.38,color:CYAN}}}});
+  }}
+  if(mode===3 || mode===4){{
+    // Re-add the overlay after the first render so the aligned model is fitted.
+    overlayBySite();
+  }}
+  viewer.zoomTo(); viewer.render();
+  const labels={{1:'Mode 1 — full proteins + highlighted 3-residue sites',2:'Mode 2 — active-site residues only',3:'Mode 3 — overlaid proteins + highlighted sites',4:'Mode 4 — overlaid active-site residues only'}};
+  document.getElementById('status').textContent=labels[mode];
+}}
+async function loadPdb(id){{
+  const r=await fetch('https://files.rcsb.org/download/'+encodeURIComponent(id)+'.pdb');
+  if(!r.ok) throw new Error('Could not download '+id+' from RCSB');
+  return await r.text();
+}}
+async function init(){{
+ try{{
+  viewer=$3Dmol.createViewer(document.getElementById('viewer'),{{backgroundColor:'white'}});
+  const qp=await loadPdb(DATA.query); qModel=viewer.addModel(qp,'pdb');
+  if(DATA.homolog){{const hp=await loadPdb(DATA.homolog); hModel=viewer.addModel(hp,'pdb');}}
+  else{{document.getElementById('status').textContent='Select a SPRITE homolog to compare structures.';return;}}
+  // Start in Mode 1. The Streamlit radio control changes modes through the
+  // query-string bridge below when it is recreated.
+  clearStyles();
+  qModel.setStyle({{chain:DATA.qchain,resi:DATA.qres}},{{stick:{{radius:0.24,colorscheme:'orangeCarbon'}},sphere:{{radius:0.38,color:ORANGE}}}});
+  hModel.setStyle({{chain:DATA.hchain,resi:DATA.hres}},{{stick:{{radius:0.24,colorscheme:'cyanCarbon'}},sphere:{{radius:0.38,color:CYAN}}}});
+  viewer.zoomTo();viewer.render();
+  window.applyMode=showMode;
+  document.getElementById('status').textContent='Mode 1 — full proteins + highlighted 3-residue sites';
+ }}catch(e){{document.getElementById('status').textContent='3D viewer error: '+e.message;}}
+}}
+init();
+</script></body></html>'''
