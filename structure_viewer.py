@@ -46,10 +46,8 @@ def viewer_html(
 ) -> str:
     """Create a self-contained 3Dmol viewer with four SPRITE comparison modes.
 
-    Modes 3/4 use the complete residue correspondence supplied by Foldseek's
-    structural alignment, rather than trying to orient two proteins from only
-    the three SPRITE residues. The three SPRITE residues are then highlighted
-    on top of that scientifically meaningful structural overlay.
+    Modes 3/4 use the complete Foldseek residue alignment to orient the
+    homolog, then highlight the exact three SPRITE-mapped residues.
     """
     query = normalize_pdb_id(pdb_id)
     qchain = str(chain or "").strip()
@@ -140,9 +138,6 @@ function oneLetter(resn) {{
  return m[String(resn||'').toUpperCase()]||'X';
 }}
 
-/* Build residue-to-residue correspondence from Foldseek's complete alignment.
-   This is the same alignment Foldseek used to calculate structural similarity;
-   we are not inventing a new sequence alignment in the browser. */
 function getFullAlignmentPairs() {{
  const qr=caResidues(qModel,DATA.qchain),hr=caResidues(hModel,DATA.hchain);
  let qi=alignmentStart(DATA.q_aln,qr,DATA.q_start),hi=alignmentStart(DATA.t_aln,hr,DATA.t_start);
@@ -163,8 +158,6 @@ function getFullAlignmentPairs() {{
  return pairs;
 }}
 
-/* Horn quaternion best-fit rigid transform over the FULL Foldseek alignment.
-   This performs only rotation + translation: no scaling and no deformation. */
 function bestFitRigid(src,dst) {{
  const cs=centroid(src),cd=centroid(dst);
  const P=src.map(p=>sub(p,cs)),Q=dst.map(p=>sub(p,cd));
@@ -186,22 +179,32 @@ function overlayByFoldseek() {{
  const src=pairs.map(p=>pt(p.h)),dst=pairs.map(p=>pt(p.q));
  const transform=bestFitRigid(src,dst);
  const coords=hModel.atoms.map(a=>{{const p=transform(pt(a));return [p.x,p.y,p.z];}});
- hModel.setCoordinates([coords],'array');
+ hModel.setCoordinates(coords,'array');
  let sum=0;
  for(let i=0;i<pairs.length;i++){{const p=transform(src[i]),q=dst[i];sum+=(p.x-q.x)**2+(p.y-q.y)**2+(p.z-q.z)**2;}}
  return {{rmsd:Math.sqrt(sum/pairs.length),pairs:pairs}};
 }}
 
-function baseGrey() {{ qModel.setStyle({{}},{{cartoon:{{color:GREY}}}});hModel.setStyle({{}},{{cartoon:{{color:GREY}}}}); }}
-function baseOverlay() {{ qModel.setStyle({{}},{{cartoon:{{color:BLUE}}}});hModel.setStyle({{}},{{cartoon:{{color:YELLOW}}}}); }}
+function baseGrey() {{
+ qModel.setStyle({{}},{{cartoon:{{color:GREY}}}});
+ hModel.setStyle({{}},{{cartoon:{{color:GREY}}}});
+}}
+function baseOverlay() {{
+ qModel.setStyle({{}},{{cartoon:{{color:BLUE}}}});
+ hModel.setStyle({{}},{{cartoon:{{color:YELLOW}}}});
+}}
 function highlightSites() {{
- const qr=unique3(DATA.qres),hr=unique3(DATA.hres);if(!qr||!hr)throw new Error('Exactly three SPRITE residues are required');
- qModel.addStyle({{chain:DATA.qchain,resi:qr}},{{stick:{{radius:0.30,color:SITE_BLUE}},sphere:{{radius:0.48,color:SITE_BLUE}}}});
- hModel.addStyle({{chain:DATA.hchain,resi:hr}},{{stick:{{radius:0.30,color:SITE_YELLOW}},sphere:{{radius:0.48,color:SITE_YELLOW}}}});
+ const qr=unique3(DATA.qres),hr=unique3(DATA.hres);
+ if(!qr||!hr)throw new Error('Exactly three SPRITE residues are required');
+ // GLModel uses setStyle(..., add=true); addStyle is not a 3Dmol GLModel API.
+ qModel.setStyle({{chain:DATA.qchain,resi:qr}},{{stick:{{radius:0.30,color:SITE_BLUE}},sphere:{{radius:0.48,color:SITE_BLUE}}}},true);
+ hModel.setStyle({{chain:DATA.hchain,resi:hr}},{{stick:{{radius:0.30,color:SITE_YELLOW}},sphere:{{radius:0.48,color:SITE_YELLOW}}}},true);
 }}
 function siteOnly() {{
- const qr=unique3(DATA.qres),hr=unique3(DATA.hres);if(!qr||!hr)throw new Error('Exactly three SPRITE residues are required');
- qModel.setStyle({{}},{{}});hModel.setStyle({{}},{{}});
+ const qr=unique3(DATA.qres),hr=unique3(DATA.hres);
+ if(!qr||!hr)throw new Error('Exactly three SPRITE residues are required');
+ qModel.setStyle({{}},{{}});
+ hModel.setStyle({{}},{{}});
  qModel.setStyle({{chain:DATA.qchain,resi:qr}},{{stick:{{radius:0.34,color:SITE_BLUE}},sphere:{{radius:0.52,color:SITE_BLUE}}}});
  hModel.setStyle({{chain:DATA.hchain,resi:hr}},{{stick:{{radius:0.34,color:SITE_YELLOW}},sphere:{{radius:0.52,color:SITE_YELLOW}}}});
 }}
@@ -222,17 +225,28 @@ function showMode(mode) {{
    else {{siteOnly();addSiteLabels();}}
    viewer.zoomTo();viewer.render();
    const labels={{1:'Mode 1 — full proteins grey + three sites highlighted',2:'Mode 2 — three SPRITE residues only',3:'Mode 3 — Foldseek-aligned full overlay + three sites highlighted',4:'Mode 4 — Foldseek-aligned overlay, three sites only'}};
-   let text=labels[mode];if(diag)text+=' · full-alignment CA RMSD '+diag.rmsd.toFixed(2)+' Å · '+diag.pairs.length+' aligned residues';
+   let text=labels[mode];
+   if(diag)text+=' · full-alignment CA RMSD '+diag.rmsd.toFixed(2)+' Å · '+diag.pairs.length+' aligned residues';
    document.getElementById('status').textContent=text;
  }}catch(e){{document.getElementById('status').textContent='3D viewer error: '+e.message;}}
 }}
-async function loadPdb(id) {{const r=await fetch('https://files.rcsb.org/download/'+encodeURIComponent(id)+'.pdb');if(!r.ok)throw new Error('Could not download '+id+' from RCSB');return await r.text();}}
+async function loadPdb(id) {{
+ const r=await fetch('https://files.rcsb.org/download/'+encodeURIComponent(id)+'.pdb');
+ if(!r.ok)throw new Error('Could not download '+id+' from RCSB');
+ return await r.text();
+}}
 async function init() {{
  try {{
    viewer=$3Dmol.createViewer(document.getElementById('viewer'),{{backgroundColor:'white'}});
    const qp=await loadPdb(DATA.query);qModel=viewer.addModel(qp,'pdb');
-   if(!DATA.homolog){{qModel.setStyle({{}},{{cartoon:{{color:GREY}}}});viewer.zoomTo();viewer.render();document.getElementById('status').textContent='Select a SPRITE homolog to compare structures.';return;}}
-   const hp=await loadPdb(DATA.homolog);hModel=viewer.addModel(hp,'pdb');showMode(DATA.mode);
+   if(!DATA.homolog){{
+     qModel.setStyle({{}},{{cartoon:{{color:GREY}}}});
+     viewer.zoomTo();viewer.render();
+     document.getElementById('status').textContent='Select a SPRITE homolog to compare structures.';
+     return;
+   }}
+   const hp=await loadPdb(DATA.homolog);hModel=viewer.addModel(hp,'pdb');
+   showMode(DATA.mode);
  }}catch(e){{document.getElementById('status').textContent='3D viewer error: '+e.message;}}
 }}
 init();
