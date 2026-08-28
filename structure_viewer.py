@@ -40,7 +40,7 @@ def viewer_html(
     homolog_chain: str | None = None,
     homolog_residues=None,
 ) -> str:
-    """Create a self-contained 3Dmol viewer with four comparison modes."""
+    """Create a self-contained 3Dmol viewer with four SPRITE comparison modes."""
     query = normalize_pdb_id(pdb_id)
     qchain = str(chain or "").strip()
     if qchain and not _CHAIN_RE.fullmatch(qchain):
@@ -52,6 +52,11 @@ def viewer_html(
     if hchain and not _CHAIN_RE.fullmatch(hchain):
         raise ValueError("Invalid homolog chain identifier")
     hres = normalize_residues(homolog_residues)
+
+    # SPRITE comparison is specifically a three-residue comparison. Never render
+    # an overlay with fewer than three unique residue numbers.
+    if homolog and (len(qres) != 3 or len(hres) != 3):
+        raise ValueError("A SPRITE overlay requires exactly three residues on each structure")
 
     safe_height = max(420, min(int(height), 900))
     payload = {"query": query.upper(), "qchain": qchain, "qres": qres,
@@ -66,63 +71,93 @@ def viewer_html(
 <script>
 const DATA={data};
 let viewer=null, qModel=null, hModel=null;
-const ORANGE='orange', CYAN='cyan';
-function atoms(model, chain, resis) {{
-  if(!model || !chain || !resis || !resis.length) return [];
-  const wanted=new Set(resis.map(String));
-  return model.selectedAtoms({{chain:chain}}).filter(a=>wanted.has(String(a.resi)));
+const BLUE='#3b82f6', YELLOW='#facc15', SITE_BLUE='#2563eb', SITE_YELLOW='#d97706';
+
+function unique3(arr) {{
+  const out=[]; const seen=new Set();
+  for(const x of (arr||[])) {{ const s=String(x); if(!seen.has(s)) {{seen.add(s);out.push(s);}} }}
+  return out.length===3 ? out : null;
 }}
-function sub(a,b) {{ return {{x:a.x-b.x,y:a.y-b.y,z:a.z-b.z}}; }}
-function add(a,b) {{ return {{x:a.x+b.x,y:a.y+b.y,z:a.z+b.z}}; }}
-function mul(a,s) {{ return {{x:a.x*s,y:a.y*s,z:a.z*s}}; }}
-function dot(a,b) {{ return a.x*b.x+a.y*b.y+a.z*b.z; }}
-function cross(a,b) {{ return {{x:a.y*b.z-a.z*b.y,y:a.z*b.x-a.x*b.z,z:a.x*b.y-a.y*b.x}}; }}
-function norm(a) {{ const n=Math.sqrt(dot(a,a))||1; return mul(a,1/n); }}
-function basis(points) {{
-  const o=points[0];
-  const e1=norm(sub(points[1],o));
-  const raw=sub(points[2],o);
-  const e2=norm(sub(raw,mul(e1,dot(raw,e1))));
-  const e3=norm(cross(e1,e2));
-  return {{o:o,e1:e1,e2:e2,e3:e3}};
+function ca(model, chain, res) {{
+  if(!model || !chain) return null;
+  const atoms=model.selectedAtoms({{chain:chain,resi:String(res)}});
+  return atoms.find(a=>String(a.atom||'').toUpperCase()==='CA' || String(a.name||'').toUpperCase()==='CA') || null;
 }}
-function toBasis(p,b) {{ const v=sub(p,b.o); return {{x:dot(v,b.e1),y:dot(v,b.e2),z:dot(v,b.e3)}}; }}
-function fromBasis(v,b) {{ return add(b.o,add(mul(b.e1,v.x),add(mul(b.e2,v.y),mul(b.e3,v.z)))); }}
-function alphaFor(model,chain,res) {{
-  return model.selectedAtoms({{chain:chain,resi:String(res)}}).find(a=>a.atom==='CA'||a.name==='CA') || null;
+function vec(a,b) {{return {{x:a.x-b.x,y:a.y-b.y,z:a.z-b.z}};}}
+function add(a,b) {{return {{x:a.x+b.x,y:a.y+b.y,z:a.z+b.z}};}}
+function scale(a,s) {{return {{x:a.x*s,y:a.y*s,z:a.z*s}};}}
+function dot(a,b) {{return a.x*b.x+a.y*b.y+a.z*b.z;}}
+function cross(a,b) {{return {{x:a.y*b.z-a.z*b.y,y:a.z*b.x-a.x*b.z,z:a.x*b.y-a.y*b.x}};}}
+function unit(a) {{const n=Math.hypot(a.x,a.y,a.z); if(n<1e-8) throw new Error('SPRITE residues are geometrically degenerate'); return scale(a,1/n);}}
+
+// Construct a right-handed orthonormal frame from the three CA coordinates.
+// Using the same ordered three residues on both proteins gives a deterministic
+// rigid-body transform (translation + rotation only; no scaling or reflection).
+function frame(points) {{
+  const origin=points[0];
+  const e1=unit(vec(points[1],origin));
+  const raw=vec(points[2],origin);
+  const e2=unit(vec(raw,scale(e1,dot(raw,e1))));
+  const e3=unit(cross(e1,e2));
+  return {{o:origin,e1:e1,e2:e2,e3:e3}};
 }}
-function overlayBySite() {{
-  if(!qModel||!hModel||DATA.qres.length<3||DATA.hres.length<3) return false;
-  const qc=[],hc=[];
+function local(p,f) {{const v=vec(p,f.o); return {{x:dot(v,f.e1),y:dot(v,f.e2),z:dot(v,f.e3)}};}}
+function world(v,f) {{return add(f.o,add(scale(f.e1,v.x),add(scale(f.e2,v.y),scale(f.e3,v.z))));}}
+
+function overlayByThreeResidues() {{
+  const qr=unique3(DATA.qres), hr=unique3(DATA.hres);
+  if(!qModel||!hModel||!qr||!hr) return false;
+  const qp=[],hp=[];
   for(let i=0;i<3;i++) {{
-    const q=alphaFor(qModel,DATA.qchain,DATA.qres[i]);
-    const h=alphaFor(hModel,DATA.hchain,DATA.hres[i]);
-    if(!q||!h) return false;
-    qc.push({{x:q.x,y:q.y,z:q.z}}); hc.push({{x:h.x,y:h.y,z:h.z}});
+    const q=ca(qModel,DATA.qchain,qr[i]);
+    const h=ca(hModel,DATA.hchain,hr[i]);
+    if(!q||!h) throw new Error('Could not locate CA atom for one of the three SPRITE residues');
+    qp.push({{x:q.x,y:q.y,z:q.z}}); hp.push({{x:h.x,y:h.y,z:h.z}});
   }}
-  const qb=basis(qc), hb=basis(hc);
+  const qf=frame(qp), hf=frame(hp);
   for(const a of hModel.atoms) {{
-    const local=toBasis({{x:a.x,y:a.y,z:a.z}},hb);
-    const p=fromBasis(local,qb); a.x=p.x; a.y=p.y; a.z=p.z;
+    const p=world(local({{x:a.x,y:a.y,z:a.z}},hf),qf);
+    a.x=p.x; a.y=p.y; a.z=p.z;
+  }}
+  // Verify all three matched CA atoms now occupy the corresponding query
+  // positions. This catches accidental residue-order or transform regressions.
+  for(let i=0;i<3;i++) {{
+    const h=ca(hModel,DATA.hchain,hr[i]), q=ca(qModel,DATA.qchain,qr[i]);
+    if(!h||!q||Math.hypot(h.x-q.x,h.y-q.y,h.z-q.z)>0.15) throw new Error('SPRITE overlay verification failed');
   }}
   return true;
 }}
-function clearStyles() {{
-  qModel.setStyle({{}},{{cartoon:{{color:'#cbd5e1'}}}});
-  hModel.setStyle({{}},{{cartoon:{{color:'#93c5fd'}}}});
+
+function styleFull() {{
+  // In ordinary views the structures are neutral grey; only the three SPRITE
+  // residues carry the identifying blue/yellow colors.
+  qModel.setStyle({{}},{{cartoon:{{color:'#b8bec7'}}}});
+  hModel.setStyle({{}},{{cartoon:{{color:'#b8bec7'}}}});
+}}
+function styleOverlay() {{
+  // In overlay views the two proteins are deliberately distinguishable.
+  qModel.setStyle({{}},{{cartoon:{{color:BLUE}}}});
+  hModel.setStyle({{}},{{cartoon:{{color:YELLOW}}}});
+}}
+function showSiteStyles() {{
+  const qr=unique3(DATA.qres),hr=unique3(DATA.hres);
+  if(!qr||!hr) throw new Error('Exactly three SPRITE residues are required');
+  qModel.setStyle({{chain:DATA.qchain,resi:qr}},{{stick:{{radius:0.25,color:SITE_BLUE}},sphere:{{radius:0.42,color:SITE_BLUE}}}});
+  hModel.setStyle({{chain:DATA.hchain,resi:hr}},{{stick:{{radius:0.25,color:SITE_YELLOW}},sphere:{{radius:0.42,color:SITE_YELLOW}}}});
 }}
 function showMode(mode) {{
   if(!viewer||!qModel||!hModel) return;
-  clearStyles();
-  const qSel={{chain:DATA.qchain,resi:DATA.qres}};
-  const hSel={{chain:DATA.hchain,resi:DATA.hres}};
-  if(mode===2 || mode===4) {{ qModel.setStyle({{}},{{}}); hModel.setStyle({{}},{{}}); }}
-  qModel.setStyle(qSel,{{stick:{{radius:0.24,colorscheme:'orangeCarbon'}},sphere:{{radius:0.38,color:ORANGE}}}});
-  hModel.setStyle(hSel,{{stick:{{radius:0.24,colorscheme:'cyanCarbon'}},sphere:{{radius:0.38,color:CYAN}}}});
-  if(mode===3 || mode===4) {{ overlayBySite(); }}
-  viewer.zoomTo(); viewer.render();
-  const labels={{1:'Mode 1 — full proteins + highlighted 3-residue sites',2:'Mode 2 — active-site residues only',3:'Mode 3 — overlaid proteins + highlighted sites',4:'Mode 4 — overlaid active-site residues only'}};
-  document.getElementById('status').textContent=labels[mode];
+  const qr=unique3(DATA.qres),hr=unique3(DATA.hres);
+  if(!qr||!hr) {{ document.getElementById('status').textContent='3D viewer error: exactly three SPRITE residues are required'; return; }}
+  try {{
+    if(mode===3||mode===4) overlayByThreeResidues();
+    if(mode===1||mode===2) styleFull(); else styleOverlay();
+    if(mode===2||mode===4) {{ qModel.setStyle({{}},{{}}); hModel.setStyle({{}},{{}}); }}
+    showSiteStyles();
+    viewer.zoomTo(); viewer.render();
+    const labels={{1:'Mode 1 — full proteins + 3 highlighted residues',2:'Mode 2 — 3 residues only',3:'Mode 3 — rigid overlay + highlighted residues',4:'Mode 4 — rigid overlay, 3 residues only'}};
+    document.getElementById('status').textContent=labels[mode];
+  }} catch(e) {{ document.getElementById('status').textContent='3D viewer error: '+e.message; }}
 }}
 async function loadPdb(id) {{
   const r=await fetch('https://files.rcsb.org/download/'+encodeURIComponent(id)+'.pdb');
@@ -135,12 +170,8 @@ async function init() {{
   const qp=await loadPdb(DATA.query); qModel=viewer.addModel(qp,'pdb');
   if(!DATA.homolog) {{ document.getElementById('status').textContent='Select a SPRITE homolog to compare structures.'; return; }}
   const hp=await loadPdb(DATA.homolog); hModel=viewer.addModel(hp,'pdb');
-  clearStyles();
-  qModel.setStyle({{chain:DATA.qchain,resi:DATA.qres}},{{stick:{{radius:0.24,colorscheme:'orangeCarbon'}},sphere:{{radius:0.38,color:ORANGE}}}});
-  hModel.setStyle({{chain:DATA.hchain,resi:DATA.hres}},{{stick:{{radius:0.24,colorscheme:'cyanCarbon'}},sphere:{{radius:0.38,color:CYAN}}}});
-  viewer.zoomTo(); viewer.render();
+  showMode(1);
   window.applyMode=showMode;
-  document.getElementById('status').textContent='Mode 1 — full proteins + highlighted 3-residue sites';
  }} catch(e) {{ document.getElementById('status').textContent='3D viewer error: '+e.message; }}
 }}
 init();
