@@ -60,12 +60,8 @@ def viewer_html(
 
     safe_height = max(420, min(int(height), 900))
     payload = {
-        "query": query.upper(),
-        "qchain": qchain,
-        "qres": qres,
-        "homolog": homolog.upper(),
-        "hchain": hchain,
-        "hres": hres,
+        "query": query.upper(), "qchain": qchain, "qres": qres,
+        "homolog": homolog.upper(), "hchain": hchain, "hres": hres,
         "mode": mode,
     }
     data = json.dumps(payload).replace("</", "<\\/")
@@ -77,178 +73,146 @@ def viewer_html(
 </head><body><div id="viewer"></div><div id="status">Loading structures…</div>
 <script>
 const DATA={data};
-let viewer=null, qModel=null, hModel=null;
-const GREY='#a7adb5', BLUE='#2563eb', YELLOW='#facc15';
-const SITE_BLUE='#2563eb', SITE_YELLOW='#f59e0b';
+let viewer=null,qModel=null,hModel=null;
+const GREY='#a7adb5',BLUE='#2563eb',YELLOW='#facc15';
+const SITE_BLUE='#2563eb',SITE_YELLOW='#f59e0b';
 
 function unique3(arr) {{
-  const out=[]; const seen=new Set();
-  for(const x of (arr||[])) {{
-    const s=String(x);
-    if(!seen.has(s)) {{ seen.add(s); out.push(s); }}
-  }}
-  return out.length===3 ? out : null;
+ const out=[],seen=new Set();
+ for(const x of (arr||[])) {{ const s=String(x); if(!seen.has(s)){{seen.add(s);out.push(s);}} }}
+ return out.length===3?out:null;
 }}
-
-function ca(model, chain, res) {{
-  const atoms=model.selectedAtoms({{chain:chain,resi:String(res)}});
-  return atoms.find(a=>String(a.atom||'').toUpperCase()==='CA' || String(a.name||'').toUpperCase()==='CA') || null;
+function ca(model,chain,res) {{
+ const atoms=model.selectedAtoms({{chain:chain,resi:String(res)}});
+ return atoms.find(a=>String(a.atom||'').toUpperCase()==='CA'||String(a.name||'').toUpperCase()==='CA')||null;
 }}
-
-function vsub(a,b) {{ return {{x:a.x-b.x,y:a.y-b.y,z:a.z-b.z}}; }}
-function vadd(a,b) {{ return {{x:a.x+b.x,y:a.y+b.y,z:a.z+b.z}}; }}
-function vscale(a,s) {{ return {{x:a.x*s,y:a.y*s,z:a.z*s}}; }}
+function pt(a) {{ return {{x:Number(a.x),y:Number(a.y),z:Number(a.z)}}; }}
+function sub(a,b) {{ return {{x:a.x-b.x,y:a.y-b.y,z:a.z-b.z}}; }}
+function add(a,b) {{ return {{x:a.x+b.x,y:a.y+b.y,z:a.z+b.z}}; }}
+function scale(a,s) {{ return {{x:a.x*s,y:a.y*s,z:a.z*s}}; }}
 function dot(a,b) {{ return a.x*b.x+a.y*b.y+a.z*b.z; }}
-function cross(a,b) {{ return {{x:a.y*b.z-a.z*b.y,y:a.z*b.x-a.x*b.z,z:a.x*b.y-a.y*b.x}}; }}
 function norm(a) {{ return Math.hypot(a.x,a.y,a.z); }}
-function unit(a) {{ const n=norm(a); if(n<1e-8) throw new Error('The three SPRITE residues are geometrically degenerate'); return vscale(a,1/n); }}
+function centroid(ps) {{ let c={{x:0,y:0,z:0}}; for(const p of ps)c=add(c,p); return scale(c,1/ps.length); }}
 
-/*
- * Build a right-handed orthonormal frame from the three CA atoms.
- * Mapping homolog frame -> query frame gives a rigid-body transformation:
- * translation + rotation only. No scaling, stretching, or camera tricks.
- */
-function makeFrame(points) {{
-  const o=points[0];
-  const e1=unit(vsub(points[1],o));
-  const raw=vsub(points[2],o);
-  const e2raw=vsub(raw,vscale(e1,dot(raw,e1)));
-  const e2=unit(e2raw);
-  const e3=unit(cross(e1,e2));
-  return {{o:o,e1:e1,e2:e2,e3:e3}};
-}}
-
-function toLocal(p,f) {{
-  const v=vsub(p,f.o);
-  return {{x:dot(v,f.e1),y:dot(v,f.e2),z:dot(v,f.e3)}};
-}}
-
-function toWorld(p,f) {{
-  return vadd(f.o,vadd(vscale(f.e1,p.x),vadd(vscale(f.e2,p.y),vscale(f.e3,p.z))));
+/* Horn's quaternion method: best-fit rigid rotation for the three matched CA atoms.
+   Unlike the old three-point frame, this does not assume the two local triangles have
+   identical side lengths. A rigid overlay can therefore be shown even when the
+   experimental structures have locally different geometry. */
+function bestFitRigid(src,dst) {{
+ const cs=centroid(src),cd=centroid(dst);
+ const P=src.map(p=>sub(p,cs)),Q=dst.map(p=>sub(p,cd));
+ let Sxx=0,Sxy=0,Sxz=0,Syx=0,Syy=0,Syz=0,Szx=0,Szy=0,Szz=0;
+ for(let i=0;i<3;i++) {{
+   const p=P[i],q=Q[i];
+   Sxx+=p.x*q.x; Sxy+=p.x*q.y; Sxz+=p.x*q.z;
+   Syx+=p.y*q.x; Syy+=p.y*q.y; Syz+=p.y*q.z;
+   Szx+=p.z*q.x; Szy+=p.z*q.y; Szz+=p.z*q.z;
+ }}
+ const N=[
+  [Sxx+Syy+Szz,Syz-Szy,Szx-Sxz,Sxy-Syx],
+  [Syz-Szy,Sxx-Syy-Szz,Sxy+Syx,Szx+Sxz],
+  [Szx-Sxz,Sxy+Syx,-Sxx+Syy-Szz,Syz+Szy],
+  [Sxy-Syx,Szx+Sxz,Syz+Szy,-Sxx-Syy+Szz]
+ ];
+ let q=[1,0,0,0];
+ for(let k=0;k<80;k++) {{
+   const n=[0,0,0,0];
+   for(let r=0;r<4;r++)for(let c=0;c<4;c++)n[r]+=N[r][c]*q[c];
+   const len=Math.hypot(n[0],n[1],n[2],n[3])||1;
+   q=n.map(v=>v/len);
+ }}
+ const w=q[0],x=q[1],y=q[2],z=q[3];
+ const R=[
+  [1-2*(y*y+z*z),2*(x*y-w*z),2*(x*z+w*y)],
+  [2*(x*y+w*z),1-2*(x*x+z*z),2*(y*z-w*x)],
+  [2*(x*z-w*y),2*(y*z+w*x),1-2*(x*x+y*y)]
+ ];
+ function transform(p) {{
+   const v=sub(p,cs);
+   return add(cd,{{x:R[0][0]*v.x+R[0][1]*v.y+R[0][2]*v.z,y:R[1][0]*v.x+R[1][1]*v.y+R[1][2]*v.z,z:R[2][0]*v.x+R[2][1]*v.y+R[2][2]*v.z}});
+ }}
+ return {{transform:transform,src:src,dst:dst}};
 }}
 
 function getSpritePoints() {{
-  const qr=unique3(DATA.qres), hr=unique3(DATA.hres);
-  if(!qr||!hr) throw new Error('SPRITE requires exactly three residues on each structure');
-  const qp=[],hp=[];
-  for(let i=0;i<3;i++) {{
-    const q=ca(qModel,DATA.qchain,qr[i]);
-    const h=ca(hModel,DATA.hchain,hr[i]);
-    if(!q||!h) throw new Error('Could not locate CA atoms for all three SPRITE residues');
-    qp.push({{x:Number(q.x),y:Number(q.y),z:Number(q.z)}});
-    hp.push({{x:Number(h.x),y:Number(h.y),z:Number(h.z)}});
-  }}
-  return {{qr,hr,qp,hp}};
+ const qr=unique3(DATA.qres),hr=unique3(DATA.hres);
+ if(!qr||!hr)throw new Error('SPRITE requires exactly three residues on each structure');
+ const qp=[],hp=[];
+ for(let i=0;i<3;i++) {{
+   const q=ca(qModel,DATA.qchain,qr[i]),h=ca(hModel,DATA.hchain,hr[i]);
+   if(!q||!h)throw new Error('Could not locate CA atoms for all three SPRITE residues');
+   qp.push(pt(q));hp.push(pt(h));
+ }}
+ return {{qr:qr,hr:hr,qp:qp,hp:hp}};
 }}
 
-function rigidOverlayThreeResidues() {{
-  const {{qp,hp}}=getSpritePoints();
-  const qf=makeFrame(qp), hf=makeFrame(hp);
-
-  // Transform every homolog atom using the same rigid transform used for the site.
-  const coords=hModel.atoms.map(a=>{{
-    const local=toLocal({{x:Number(a.x),y:Number(a.y),z:Number(a.z)}},hf);
-    const world=toWorld(local,qf);
-    return [world.x,world.y,world.z];
-  }});
-  hModel.setCoordinates([coords],'array');
-  hModel.molObj=null;
-
-  // Verify the actual model coordinates after setCoordinates(), not a stale atom copy.
-  const check=getSpritePoints();
-  let maxErr=0;
-  for(let i=0;i<3;i++) {{
-    const d=Math.hypot(check.qp[i].x-check.hp[i].x,check.qp[i].y-check.hp[i].y,check.qp[i].z-check.hp[i].z);
-    maxErr=Math.max(maxErr,d);
-  }}
-  if(maxErr>0.35) throw new Error('SPRITE overlay could not be aligned from all three matched residues (max CA error '+maxErr.toFixed(2)+' Å)');
-  return maxErr;
+function overlayHomolog() {{
+ const {{qp,hp}}=getSpritePoints();
+ const fit=bestFitRigid(hp,qp);
+ const coords=hModel.atoms.map(a=>{{const p=fit.transform(pt(a));return [p.x,p.y,p.z];}});
+ hModel.setCoordinates([coords],'array');
+ const check=getSpritePoints();
+ let sum=0,maxErr=0;
+ for(let i=0;i<3;i++){{const d=Math.hypot(check.qp[i].x-check.hp[i].x,check.qp[i].y-check.hp[i].y,check.qp[i].z-check.hp[i].z);sum+=d*d;maxErr=Math.max(maxErr,d);}}
+ const rmsd=Math.sqrt(sum/3);
+ // Never hide a usable viewer merely because experimental local geometry differs.
+ // The displayed value is diagnostic; the transformation is still the best-fit rigid fit.
+ return {{rmsd:rmsd,maxErr:maxErr}};
 }}
 
-function styleFullGrey() {{
-  qModel.setStyle({{}},{{cartoon:{{color:GREY}}}});
-  hModel.setStyle({{}},{{cartoon:{{color:GREY}}}});
+function baseGrey() {{
+ qModel.setStyle({{}},{{cartoon:{{color:GREY}}}});
+ hModel.setStyle({{}},{{cartoon:{{color:GREY}}}});
 }}
-
-function styleFullOverlay() {{
-  qModel.setStyle({{}},{{cartoon:{{color:BLUE}}}});
-  hModel.setStyle({{}},{{cartoon:{{color:YELLOW}}}});
+function baseOverlay() {{
+ qModel.setStyle({{}},{{cartoon:{{color:BLUE}}}});
+ hModel.setStyle({{}},{{cartoon:{{color:YELLOW}}}});
 }}
-
 function highlightSites() {{
-  const qr=unique3(DATA.qres), hr=unique3(DATA.hres);
-  if(!qr||!hr) throw new Error('Exactly three SPRITE residues are required');
-
-  // Add site styles instead of replacing the base cartoon. This makes all three
-  // residues remain visible as part of the protein while being unmistakable.
-  qModel.addStyle({{chain:DATA.qchain,resi:qr}},{{stick:{{radius:0.25,color:SITE_BLUE}},sphere:{{radius:0.38,color:SITE_BLUE}}}});
-  hModel.addStyle({{chain:DATA.hchain,resi:hr}},{{stick:{{radius:0.25,color:SITE_YELLOW}},sphere:{{radius:0.38,color:SITE_YELLOW}}}});
+ const qr=unique3(DATA.qres),hr=unique3(DATA.hres);
+ if(!qr||!hr)throw new Error('Exactly three SPRITE residues are required');
+ qModel.addStyle({{chain:DATA.qchain,resi:qr}},{{stick:{{radius:0.30,color:SITE_BLUE}},sphere:{{radius:0.48,color:SITE_BLUE}}}});
+ hModel.addStyle({{chain:DATA.hchain,resi:hr}},{{stick:{{radius:0.30,color:SITE_YELLOW}},sphere:{{radius:0.48,color:SITE_YELLOW}}}});
+ // Explicit labels make it visually unambiguous that all three residues are present.
+ qr.forEach((r,i)=>{{const a=ca(qModel,DATA.qchain,r);if(a)viewer.addLabel(DATA.qchain+':'+r,{{position:a,fontSize:11,fontColor:BLUE,backgroundColor:'white',backgroundOpacity:0.65}});}});
+ hr.forEach((r,i)=>{{const a=ca(hModel,DATA.hchain,r);if(a)viewer.addLabel(DATA.hchain+':'+r,{{position:a,fontSize:11,fontColor:'#9a6700',backgroundColor:'white',backgroundOpacity:0.65}});}});
 }}
-
-function showSiteOnly() {{
-  const qr=unique3(DATA.qres), hr=unique3(DATA.hres);
-  qModel.setStyle({{}},{{}});
-  hModel.setStyle({{}},{{}});
-  qModel.setStyle({{chain:DATA.qchain,resi:qr}},{{stick:{{radius:0.28,color:SITE_BLUE}},sphere:{{radius:0.46,color:SITE_BLUE}}}});
-  hModel.setStyle({{chain:DATA.hchain,resi:hr}},{{stick:{{radius:0.28,color:SITE_YELLOW}},sphere:{{radius:0.46,color:SITE_YELLOW}}}});
+function siteOnly() {{
+ const qr=unique3(DATA.qres),hr=unique3(DATA.hres);
+ qModel.setStyle({{}},{{}});hModel.setStyle({{}},{{}});
+ qModel.setStyle({{chain:DATA.qchain,resi:qr}},{{stick:{{radius:0.32,color:SITE_BLUE}},sphere:{{radius:0.50,color:SITE_BLUE}}}});
+ hModel.setStyle({{chain:DATA.hchain,resi:hr}},{{stick:{{radius:0.32,color:SITE_YELLOW}},sphere:{{radius:0.50,color:SITE_YELLOW}}}});
 }}
-
+function clearLabels() {{ viewer.removeAllLabels(); }}
 function showMode(mode) {{
-  if(!viewer||!qModel||!hModel) return;
-  try {{
-    // Every iframe starts from the original structures, so there is no stale
-    // transformed homolog when the Streamlit widget is rerun.
-    if(mode===3||mode===4) rigidOverlayThreeResidues();
-
-    if(mode===1) {{
-      styleFullGrey();
-      highlightSites();
-    }} else if(mode===2) {{
-      showSiteOnly();
-    }} else if(mode===3) {{
-      styleFullOverlay();
-      highlightSites();
-    }} else {{
-      showSiteOnly();
-    }}
-
-    viewer.zoomTo();
-    viewer.render();
-    const labels={{
-      1:'Mode 1 — full proteins grey + three sites highlighted',
-      2:'Mode 2 — three SPRITE residues only',
-      3:'Mode 3 — rigid three-residue overlay + sites highlighted',
-      4:'Mode 4 — rigid three-residue overlay, sites only'
-    }};
-    document.getElementById('status').textContent=labels[mode];
-  }} catch(e) {{
-    document.getElementById('status').textContent='3D viewer error: '+e.message;
-  }}
+ if(!viewer||!qModel||!hModel)return;
+ try {{
+   clearLabels();
+   let diag=null;
+   if(mode===3||mode===4)diag=overlayHomolog();
+   if(mode===1){{baseGrey();highlightSites();}}
+   else if(mode===2){{siteOnly();}}
+   else if(mode===3){{baseOverlay();highlightSites();}}
+   else {{siteOnly();}}
+   viewer.zoomTo();viewer.render();
+   const labels={{1:'Mode 1 — full proteins grey + three sites highlighted',2:'Mode 2 — three SPRITE residues only',3:'Mode 3 — best-fit rigid overlay + three sites highlighted',4:'Mode 4 — best-fit rigid overlay, three sites only'}};
+   let text=labels[mode];
+   if(diag)text+=' · 3-site CA RMSD '+diag.rmsd.toFixed(2)+' Å';
+   document.getElementById('status').textContent=text;
+ }}catch(e){{document.getElementById('status').textContent='3D viewer error: '+e.message;}}
 }}
-
 async function loadPdb(id) {{
-  const r=await fetch('https://files.rcsb.org/download/'+encodeURIComponent(id)+'.pdb');
-  if(!r.ok) throw new Error('Could not download '+id+' from RCSB');
-  return await r.text();
+ const r=await fetch('https://files.rcsb.org/download/'+encodeURIComponent(id)+'.pdb');
+ if(!r.ok)throw new Error('Could not download '+id+' from RCSB');
+ return await r.text();
 }}
-
 async function init() {{
-  try {{
-    viewer=$3Dmol.createViewer(document.getElementById('viewer'),{{backgroundColor:'white'}});
-    const qp=await loadPdb(DATA.query);
-    qModel=viewer.addModel(qp,'pdb');
-    if(!DATA.homolog) {{
-      qModel.setStyle({{}},{{cartoon:{{color:GREY}}}});
-      viewer.zoomTo(); viewer.render();
-      document.getElementById('status').textContent='Select a SPRITE homolog to compare structures.';
-      return;
-    }}
-    const hp=await loadPdb(DATA.homolog);
-    hModel=viewer.addModel(hp,'pdb');
-    showMode(DATA.mode);
-  }} catch(e) {{
-    document.getElementById('status').textContent='3D viewer error: '+e.message;
-  }}
+ try {{
+   viewer=$3Dmol.createViewer(document.getElementById('viewer'),{{backgroundColor:'white'}});
+   const qp=await loadPdb(DATA.query);qModel=viewer.addModel(qp,'pdb');
+   if(!DATA.homolog){{qModel.setStyle({{}},{{cartoon:{{color:GREY}}}});viewer.zoomTo();viewer.render();document.getElementById('status').textContent='Select a SPRITE homolog to compare structures.';return;}}
+   const hp=await loadPdb(DATA.homolog);hModel=viewer.addModel(hp,'pdb');showMode(DATA.mode);
+ }}catch(e){{document.getElementById('status').textContent='3D viewer error: '+e.message;}}
 }}
 init();
 </script></body></html>'''
