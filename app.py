@@ -58,8 +58,8 @@ def render_sprite(hit,pairs,query_id):
     with b: reveal_button("ChimeraX: select original match",original_cmd,"sprite_original",f"Open the original protein as model #1. Chain {chosen[0].query_chain} is selected.")
     return chosen
 
-def render_viewer(pid,title,chain=None,residues=None,height=560,homolog_pid=None,homolog_chain=None,homolog_residues=None,mode=1):
-    try: markup=viewer_html(pid,chain=chain,residues=residues,height=height,homolog_pdb_id=homolog_pid,homolog_chain=homolog_chain,homolog_residues=homolog_residues,mode=mode)
+def render_viewer(pid,title,chain=None,residues=None,height=560,homolog_pid=None,homolog_chain=None,homolog_residues=None,mode=1,q_aln=None,t_aln=None,q_start=None,t_start=None):
+    try: markup=viewer_html(pid,chain=chain,residues=residues,height=height,homolog_pdb_id=homolog_pid,homolog_chain=homolog_chain,homolog_residues=homolog_residues,mode=mode,q_aln=q_aln,t_aln=t_aln,q_start=q_start,t_start=t_start)
     except ValueError as exc: st.error(f"3D viewer configuration error: {exc}"); return
     st.markdown(f'<div class="viewer-card"><div class="viewer-title">{html.escape(title)}</div>',unsafe_allow_html=True); components.html(markup,height=height+52,scrolling=False); st.markdown('</div>',unsafe_allow_html=True)
 
@@ -109,7 +109,7 @@ if "rmsd_hits" in st.session_state:
     st.subheader("3D structures")
     chosen_homolog_residues=[p.homolog_resnum for p in chosen] if chosen else []; chosen_query_residues=[p.query_resnum for p in chosen] if chosen else []; homolog_id=selected_hit.pdb_id if selected_hit else None
     if homolog_id and chosen:
-        mode_labels={1:"1 — Full proteins + highlighted SPRITE residues",2:"2 — SPRITE residues only",3:"3 — Overlay full proteins + highlighted residues",4:"4 — Overlay SPRITE residues only"}; mode=st.radio("3D view mode",list(mode_labels.keys()),format_func=lambda x:mode_labels[x],horizontal=False,key="viewer_mode",help="Modes 3 and 4 rigidly align the homolog using the same three ordered SPRITE residues.")
-        st.caption("Modes 1–2: protein ribbons are grey; original site is blue and homolog site is yellow. Modes 3–4: original protein is blue and homolog is yellow, with the three sites emphasized.")
-        render_viewer(query_id,"Interactive structure comparison",chain=query_chain,residues=chosen_query_residues,height=560,homolog_pid=homolog_id,homolog_chain=selected_hit.chain_id,homolog_residues=chosen_homolog_residues,mode=mode)
+        mode_labels={1:"1 — Full proteins + highlighted SPRITE residues",2:"2 — SPRITE residues only",3:"3 — Overlay full proteins + highlighted residues",4:"4 — Overlay SPRITE residues only"}; mode=st.radio("3D view mode",list(mode_labels.keys()),format_func=lambda x:mode_labels[x],horizontal=False,key="viewer_mode",help="Modes 3 and 4 align the homolog using Foldseek's full structural alignment, then highlight the three SPRITE residues.")
+        st.caption("Modes 1–2: protein ribbons are grey; original site is blue and homolog site is yellow. Modes 3–4: original protein is blue and homolog is yellow. Overlay orientation comes from Foldseek's full residue alignment, not the three-site coordinates.")
+        render_viewer(query_id,"Interactive structure comparison",chain=query_chain,residues=chosen_query_residues,height=560,homolog_pid=homolog_id,homolog_chain=selected_hit.chain_id,homolog_residues=chosen_homolog_residues,mode=mode,q_aln=selected_hit.q_aln,t_aln=selected_hit.t_aln,q_start=selected_hit.q_start,t_start=selected_hit.t_start)
     else: st.info("Select a SPRITE-compatible structural homolog to view the four comparison modes.")
